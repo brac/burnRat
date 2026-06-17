@@ -123,6 +123,18 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
         let activity_floor = config.thresholds.activity_floor_seconds;
         let done_hold = config.thresholds.done_hold_seconds;
         let sent_hold = config.thresholds.sent_hold_seconds;
+        let cache_weight = config.settings.rate_cache_weight.max(0.0);
+
+        // Self-calibrating usage ceiling for the approaching-limit warnings.
+        // Rather than guess a per-plan cap, learn it from the largest COMPLETED
+        // block in recent history (scanned once now). A manual planLimit (> 0)
+        // overrides it; a ceiling below `limit_min_credible` is treated as
+        // not-yet-enough-history and suppresses the warnings.
+        let manual_limit = config.settings.plan_limit().unwrap_or(0);
+        let limit_min_credible = config.settings.limit_min_credible_tokens;
+        let history = chrono::Duration::days(config.settings.limit_history_days.max(0));
+        let mut learned_peak =
+            data::historical_peak_block(&projects_dir, window_hours, history, Utc::now());
 
         let mut monitor = DataMonitor::new(projects_dir.clone(), window_hours);
         let mut tracker = RateTracker::new(config.settings.rate_window_seconds);
@@ -149,7 +161,11 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
         loop {
             monitor.poll();
             let now = Utc::now();
-            tracker.sample(now, monitor.cumulative_work);
+            // Burn signal = work + cache·weight. Both counters are monotonic, so
+            // the weighted sum is too (the rate tracker needs a monotonic input).
+            let signal =
+                monitor.cumulative_work as f64 + monitor.cumulative_cache as f64 * cache_weight;
+            tracker.sample(now, signal.round() as u64);
 
             let smoothed = tracker.smoothed_tpm();
             let instant = tracker.instant_tpm();
@@ -208,8 +224,45 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
                 };
             let is_active = awake;
 
-            let (creature, event) =
+            // Keep adapting the ceiling if a block completes while we're running.
+            let mem_completed_peak = grouped
+                .iter()
+                .filter(|b| !b.is_active)
+                .map(|b| b.total_with_cache())
+                .max()
+                .unwrap_or(0);
+            learned_peak = learned_peak.max(mem_completed_peak);
+
+            // Approaching-limit warning band: how close consumed (incl. cache) is
+            // to the ceiling. 0 none, 1 within 10%, 2 within 5%, 3 within 1%
+            // (most severe wins). Manual cap wins; else the learned ceiling, but
+            // only once it's credible enough to not cry wolf.
+            let ceiling = if manual_limit > 0 {
+                manual_limit
+            } else if learned_peak >= limit_min_credible {
+                learned_peak
+            } else {
+                0
+            };
+            let warn_level = if ceiling > 0 && active.is_some() {
+                let remaining = 1.0 - consumed_with_cache as f64 / ceiling as f64;
+                let a = &config.thresholds.approaching;
+                if remaining <= a.warn1 {
+                    3
+                } else if remaining <= a.warn5 {
+                    2
+                } else if remaining <= a.warn10 {
+                    1
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+
+            let (base, event) =
                 machine.update(awake, done, asking, recent_activity, smoothed, instant, now);
+            let creature = state::apply_approaching(base, warn_level);
             let rate_unit = unit_selector.select(smoothed).as_str();
 
             let game = GameState {

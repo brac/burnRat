@@ -6,6 +6,7 @@
 //! `CARGO_MANIFEST_DIR`) so thresholds can be tuned without a rebuild. In a
 //! shipped binary that path does not exist, so the embedded defaults are used.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -20,11 +21,25 @@ pub struct Settings {
     pub poll_interval_min_seconds: u64,
     pub poll_interval_max_seconds: u64,
     pub rate_window_seconds: i64,
+    /// How much cache tokens count toward the burn signal: 0.0 = work only
+    /// (input+output), 1.0 = full cache included. The state thresholds are
+    /// calibrated for the configured weight — change one, retune the other.
+    pub rate_cache_weight: f64,
     pub block_window_hours: i64,
     pub plan: String,
     pub opacity: f64,
     pub click_through: bool,
     pub display: DisplayCfg,
+    /// Optional manual tokens-per-window cap (input+output+cache) keyed by plan
+    /// name. A nonzero entry for the active `plan` overrides the self-calibrating
+    /// ceiling; 0/absent means use the auto-adapted ceiling instead.
+    pub plan_limits: HashMap<String, u64>,
+    /// How far back (days) the startup scan looks for the largest completed block
+    /// when auto-calibrating the usage ceiling.
+    pub limit_history_days: i64,
+    /// A learned ceiling below this many tokens is treated as not-yet-credible
+    /// (too little history) and suppresses the approaching-limit warnings.
+    pub limit_min_credible_tokens: u64,
 }
 
 /// Rate-readout auto-scale cutoffs (tokens/min). The readout prefers tok/sec and
@@ -46,6 +61,12 @@ impl Settings {
             .poll_interval_seconds
             .clamp(self.poll_interval_min_seconds, self.poll_interval_max_seconds);
         std::time::Duration::from_secs(secs)
+    }
+
+    /// Estimated token cap for the active plan, if one is configured (> 0).
+    /// Drives the approaching-limit warnings; `None` disables them.
+    pub fn plan_limit(&self) -> Option<u64> {
+        self.plan_limits.get(&self.plan).copied().filter(|&c| c > 0)
     }
 }
 
@@ -88,6 +109,16 @@ pub struct SpikeCfg {
     pub instant_tpm_flinch: f64,
 }
 
+/// Remaining-quota fractions (1 - consumed/limit) at/under which each escalating
+/// approaching-limit warning becomes eligible. E.g. warn10 = 0.10 → within 10%.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApproachingCfg {
+    pub warn10: f64,
+    pub warn5: f64,
+    pub warn1: f64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Thresholds {
@@ -95,6 +126,7 @@ pub struct Thresholds {
     pub spent: SpentCfg,
     pub onfire: OnfireCfg,
     pub spike: SpikeCfg,
+    pub approaching: ApproachingCfg,
     /// A token written within this many seconds makes the rat at least
     /// `working` immediately, without waiting for the smoothed rate to climb.
     pub activity_floor_seconds: i64,

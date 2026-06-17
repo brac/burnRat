@@ -8,7 +8,7 @@ burnRat is an *ambient companion*, not a dashboard. It floats over whatever you'
 
 ## How it works
 
-Claude Code writes one JSONL file per session to `~/.claude/projects/<project>/<conversation-id>.jsonl`, and every assistant turn records exact token usage. burnRat tails those files directly in Rust (no external dependency), computes a smoothed **work** burn rate (input + output tokens per minute — cache reads are excluded since they dwarf real work), and maps it to a creature state.
+Claude Code writes one JSONL file per session to `~/.claude/projects/<project>/<conversation-id>.jsonl`, and every assistant turn records exact token usage. burnRat tails those files directly in Rust (no external dependency), computes a smoothed burn rate (tokens per minute), and maps it to a creature state. By default the signal includes cache tokens (`rateCacheWeight`, see [Tuning](#tuning)) for big, lively numbers; set the weight to `0` to watch only work (input + output) tokens.
 
 | State | When |
 |---|---|
@@ -73,7 +73,9 @@ Produces a `.msi`/`.exe` on Windows and a `.app`/`.dmg` on macOS.
 All the magic numbers live in [`data/`](data/) and are read live in `dev` (no rebuild needed):
 
 - **`data/thresholds.json`** — burn-rate cutoffs per state (with up/down hysteresis), the onfire sustain time, the post-onfire `spent` crash, and the nap/hold timers: `idleTimeoutSeconds` (idle grace before the rat sleeps), `doneHoldSeconds` (how long the `done` pose holds after a finished turn), and `sentHoldSeconds` (how long the rat holds the idle pose after you send a message — longer, so it doesn't nap through the "dead air" before Claude responds).
-- **`data/settings.default.json`** — poll interval, rate smoothing window, 5-hour block window, default opacity, whether it starts interactive or pass-through, and `display` (the tok/sec↔tok/min auto-scale cutoffs for the readout).
+- **`data/settings.default.json`** — poll interval, rate smoothing window, 5-hour block window, default opacity, whether it starts interactive or pass-through, `display` (the tok/sec↔tok/min auto-scale cutoffs for the readout), `rateCacheWeight` (how much cache counts toward the burn signal — `1.0` = full cache/bigger numbers, `0.0` = work only; **retune `thresholds.json` if you change it**), and the usage-limit settings (`limitHistoryDays` / `limitMinCredibleTokens` for the auto-calibrated approaching-limit ceiling, plus `planLimits` as an optional manual override).
+
+The **approaching-limit warnings** (10%/5%/1% glows) calibrate the ceiling automatically: on startup burnRat scans your recent history for the largest *completed* 5-hour block (tokens incl. cache) and uses that as the limit estimate, rather than guessing a cap. It reads conservatively until you have history, and since your past peak is a lower bound on your true limit it can warn a little early — set a `planLimits` entry if you'd rather pin an exact cap.
 
 The rate readout under the rat **auto-scales** between tokens/sec and tokens/min (with hysteresis so the unit doesn't flip-flop) and is **display-eased** on an animation-frame loop so the number glides smoothly over Claude's chunky, per-turn token writes — the underlying data smoothing is still `rateWindowSeconds`.
 

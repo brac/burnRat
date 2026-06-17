@@ -59,3 +59,22 @@ body {
 .state-onfire .sprite {
   filter: drop-shadow(0 0 12px rgba(255, 90, 0, 0.95));
 }
+
+/* Approaching-limit warnings: an escalating glow so the warning reads even
+   before dedicated sprites exist (the art falls back to the idle pose). Yellow
+   (10%) → orange (5%) → pulsing red (1%, the "almost out" alarm). */
+.state-approaching10 .sprite {
+  filter: drop-shadow(0 0 10px rgba(255, 215, 0, 0.9));
+}
+.state-approaching5 .sprite {
+  filter: drop-shadow(0 0 12px rgba(255, 140, 0, 0.95));
+}
+.state-approaching1 .sprite {
+  filter: drop-shadow(0 0 14px rgba(255, 30, 0, 1));
+  animation: approaching-pulse 1s ease-in-out infinite;
+}
+@keyframes approaching-pulse {
+  50% {
+    filter: drop-shadow(0 0 22px rgba(255, 30, 0, 1));
+  }
+}

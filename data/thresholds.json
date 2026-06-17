@@ -1,11 +1,11 @@
 {
-  "$comment": "Creature-state thresholds on the SMOOTHED burn rate (tokens/min, input+output only; cache excluded). Calibrated against real Claude Code sessions: idle=0, light work ~1-7k/min, heavy bursts ~28k/min. Each state has separate up/down cutoffs (hysteresis) so a noisy signal does not strobe. Tune freely — read live in dev, no rebuild needed.",
+  "$comment": "Creature-state thresholds on the SMOOTHED burn rate (tokens/min). The signal includes cache by default (settings.rateCacheWeight=1.0), so it runs ~70x larger than work-only; these cutoffs are calibrated for that cache-inclusive scale (avg cache ~118k/turn measured). If you set rateCacheWeight=0 (work only), divide these by ~75 (working ~1500, stressed ~8000, onfire ~25000). Each state has separate up/down cutoffs (hysteresis) so a noisy signal does not strobe. Tune freely — read live in dev, no rebuild needed.",
   "states": {
     "sleeping": { "$note": "entered when no active block; not rate-driven" },
-    "calm":     { "up": 0,     "down": 0 },
-    "working":  { "up": 1500,  "down": 800 },
-    "stressed": { "up": 8000,  "down": 5500 },
-    "onfire":   { "up": 25000, "down": 18000 }
+    "calm":     { "up": 0,       "down": 0 },
+    "working":  { "up": 110000,  "down": 60000 },
+    "stressed": { "up": 600000,  "down": 410000 },
+    "onfire":   { "up": 1850000, "down": 1330000 }
   },
   "onfire": {
     "$note": "onfire requires the high rate to be sustained, not a single spike",
@@ -13,13 +13,19 @@
   },
   "spent": {
     "$note": "spent = the crash AFTER burning hot: when the rate collapses below rateThreshold within afterOnfireSeconds of being onfire, the rat is spent for durationSeconds (then relaxes to calm). NOT tied to quota exhaustion.",
-    "rateThreshold": 1500,
+    "rateThreshold": 110000,
     "afterOnfireSeconds": 90,
     "durationSeconds": 20
   },
   "spike": {
-    "$note": "instant-rate jump (tokens/min) above this triggers a transient flinch bounce",
-    "instantTpmFlinch": 80000
+    "$note": "instant-rate jump (tokens/min) above this triggers a transient flinch bounce (cache-inclusive scale; ~80k on work-only)",
+    "instantTpmFlinch": 6000000
+  },
+  "approaching": {
+    "$note": "Escalating 'approaching limit' warnings, by remaining-quota fraction (1 - consumedWithCache/ceiling). The ceiling auto-calibrates to your largest recent completed block (see settings.default.json limitHistoryDays / limitMinCredibleTokens; planLimits can override it). Layered visibility: warn10 shows over idle only; warn5 over idle+working; warn1 over everything except sleep/waiting/done.",
+    "warn10": 0.10,
+    "warn5": 0.05,
+    "warn1": 0.01
   },
   "$activityFloorNote": "Fast-attack perk-up: if a token was written within this many seconds, the rat is at least 'working' immediately (don't wait for the smoothed rate to climb). Higher states still come from the smoothed rate.",
   "activityFloorSeconds": 15,

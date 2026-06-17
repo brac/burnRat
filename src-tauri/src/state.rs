@@ -22,6 +22,9 @@ pub enum CreatureState {
     Stressed,
     OnFire,
     Spent,
+    Approaching10,
+    Approaching5,
+    Approaching1,
 }
 
 impl CreatureState {
@@ -35,7 +38,36 @@ impl CreatureState {
             CreatureState::Stressed => "stressed",
             CreatureState::OnFire => "onfire",
             CreatureState::Spent => "spent",
+            CreatureState::Approaching10 => "approaching10",
+            CreatureState::Approaching5 => "approaching5",
+            CreatureState::Approaching1 => "approaching1",
         }
+    }
+}
+
+/// Layer an approaching-limit warning over the resolved creature state.
+///
+/// `level` is the most-severe band the user is in: 0 none, 1 = within 10%,
+/// 2 = within 5%, 3 = within 1%. The warning only replaces certain base states
+/// (louder as it escalates): 10% shows over idle only; 5% over idle + working;
+/// 1% over everything *except* the resting/awaiting poses (sleeping, waiting,
+/// done) — those are never overridden at any level.
+pub fn apply_approaching(base: CreatureState, level: u8) -> CreatureState {
+    use CreatureState::*;
+    if matches!(base, Sleeping | Waiting | Done) {
+        return base;
+    }
+    match level {
+        3 => Approaching1,
+        2 => match base {
+            Calm | Working => Approaching5,
+            _ => base,
+        },
+        1 => match base {
+            Calm => Approaching10,
+            _ => base,
+        },
+        _ => base,
     }
 }
 
@@ -202,7 +234,9 @@ impl StateMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{OnfireCfg, SpentCfg, SpikeCfg, StateCut, StateThresholds, Thresholds};
+    use crate::config::{
+        ApproachingCfg, OnfireCfg, SpentCfg, SpikeCfg, StateCut, StateThresholds, Thresholds,
+    };
 
     fn thresholds() -> Thresholds {
         Thresholds {
@@ -211,6 +245,7 @@ mod tests {
                 stressed: StateCut { up: 8000.0, down: 5500.0 },
                 onfire: StateCut { up: 25000.0, down: 18000.0 },
             },
+            approaching: ApproachingCfg { warn10: 0.10, warn5: 0.05, warn1: 0.01 },
             spent: SpentCfg {
                 rate_threshold: 1500.0,
                 after_onfire_seconds: 90,
@@ -328,5 +363,49 @@ mod tests {
             m.update(true, false, true, true, 30_000.0, 0.0, t0()).0,
             CreatureState::Waiting
         );
+    }
+
+    use CreatureState::*;
+
+    #[test]
+    fn approaching10_shows_over_idle_only() {
+        assert_eq!(apply_approaching(Calm, 1), Approaching10);
+        // 10% is subtle: it does not interrupt visible work.
+        assert_eq!(apply_approaching(Working, 1), Working);
+        assert_eq!(apply_approaching(Stressed, 1), Stressed);
+    }
+
+    #[test]
+    fn approaching5_shows_over_idle_and_working() {
+        assert_eq!(apply_approaching(Calm, 2), Approaching5);
+        assert_eq!(apply_approaching(Working, 2), Approaching5);
+        // ...but not louder states.
+        assert_eq!(apply_approaching(Stressed, 2), Stressed);
+        assert_eq!(apply_approaching(OnFire, 2), OnFire);
+    }
+
+    #[test]
+    fn approaching1_shows_over_everything_active() {
+        assert_eq!(apply_approaching(Calm, 3), Approaching1);
+        assert_eq!(apply_approaching(Working, 3), Approaching1);
+        assert_eq!(apply_approaching(Stressed, 3), Approaching1);
+        assert_eq!(apply_approaching(OnFire, 3), Approaching1);
+        assert_eq!(apply_approaching(Spent, 3), Approaching1);
+    }
+
+    #[test]
+    fn approaching_never_overrides_resting_poses() {
+        // Sleeping / waiting / done are excluded at every level.
+        for level in 1..=3 {
+            assert_eq!(apply_approaching(Sleeping, level), Sleeping);
+            assert_eq!(apply_approaching(Waiting, level), Waiting);
+            assert_eq!(apply_approaching(Done, level), Done);
+        }
+    }
+
+    #[test]
+    fn no_warning_passes_state_through() {
+        assert_eq!(apply_approaching(Working, 0), Working);
+        assert_eq!(apply_approaching(Calm, 0), Calm);
     }
 }

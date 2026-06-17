@@ -41,11 +41,17 @@ pub struct UsageEntry {
 }
 
 impl UsageEntry {
-    /// Tokens that represent real work (drives the creature state).
-    /// Cache reads/writes are excluded — they dwarf real work and would peg the
-    /// rat permanently on fire.
+    /// "Real work" tokens: model input + output, excluding cache. The historical
+    /// burn signal — small, lively numbers that swing with real generation.
     pub fn work(&self) -> u64 {
         self.input + self.output
+    }
+
+    /// Cache tokens (creation + read). These dwarf work (~70× in practice) and
+    /// are mixed into the burn signal via `rateCacheWeight` — bigger numbers,
+    /// more rat action — with thresholds calibrated to that larger scale.
+    pub fn cache(&self) -> u64 {
+        self.cache_create + self.cache_read
     }
 }
 
@@ -64,6 +70,9 @@ pub struct DataMonitor {
     /// Monotonic total of `work()` tokens ever seen (never pruned) — the rate
     /// tracker samples this so pruning can't corrupt the burn-rate signal.
     pub cumulative_work: u64,
+    /// Monotonic total of `cache()` tokens ever seen — combined with
+    /// `cumulative_work` (weighted by `rateCacheWeight`) into the burn signal.
+    pub cumulative_cache: u64,
     /// How far back to retain entries (block window + margin).
     retention: Duration,
     /// Cached list of JSONL files, refreshed every RESCAN_SECS.
@@ -82,6 +91,7 @@ impl DataMonitor {
             seen: HashSet::new(),
             entries: Vec::new(),
             cumulative_work: 0,
+            cumulative_cache: 0,
             retention: Duration::hours(block_window_hours + 1),
             files: Vec::new(),
             last_scan: None,
@@ -216,6 +226,7 @@ impl DataMonitor {
                 self.note_conversational(&v);
                 if let Some(entry) = self.usage_entry(&v) {
                     self.cumulative_work += entry.work();
+                    self.cumulative_cache += entry.cache();
                     self.entries.push(entry);
                     added += 1;
                 }
@@ -251,32 +262,98 @@ impl DataMonitor {
         if v.get("type")?.as_str()? != "assistant" {
             return None;
         }
-        let usage = v.get("message")?.get("usage")?;
-
-        // Dedup: prefer requestId, then message.id, then uuid.
-        let key = v
-            .get("requestId")
-            .and_then(|x| x.as_str())
-            .or_else(|| v.get("message").and_then(|m| m.get("id")).and_then(|x| x.as_str()))
-            .or_else(|| v.get("uuid").and_then(|x| x.as_str()))
-            .map(|s| s.to_string());
-        if let Some(k) = key {
+        v.get("message")?.get("usage")?; // require a usage block before deduping
+        if let Some(k) = dedup_key(v) {
             if !self.seen.insert(k) {
                 return None;
             }
         }
-
-        let ts = parse_ts(v)?;
-
-        let n = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
-        Some(UsageEntry {
-            ts,
-            input: n("input_tokens"),
-            output: n("output_tokens"),
-            cache_create: n("cache_creation_input_tokens"),
-            cache_read: n("cache_read_input_tokens"),
-        })
+        usage_fields(v)
     }
+}
+
+/// Dedup key for an assistant usage line: prefer requestId, then message.id,
+/// then uuid. Shared by the live tail and the historical scan.
+fn dedup_key(v: &serde_json::Value) -> Option<String> {
+    v.get("requestId")
+        .and_then(|x| x.as_str())
+        .or_else(|| v.get("message").and_then(|m| m.get("id")).and_then(|x| x.as_str()))
+        .or_else(|| v.get("uuid").and_then(|x| x.as_str()))
+        .map(|s| s.to_string())
+}
+
+/// Extract the token counts + timestamp from an assistant usage line.
+fn usage_fields(v: &serde_json::Value) -> Option<UsageEntry> {
+    let usage = v.get("message")?.get("usage")?;
+    let ts = parse_ts(v)?;
+    let n = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+    Some(UsageEntry {
+        ts,
+        input: n("input_tokens"),
+        output: n("output_tokens"),
+        cache_create: n("cache_creation_input_tokens"),
+        cache_read: n("cache_read_input_tokens"),
+    })
+}
+
+/// One-shot historical scan for the self-calibrating usage ceiling: the largest
+/// **completed** 5-hour block (total incl. cache) across all sessions touched
+/// within `max_age`. Read-only, runs once at startup off the main loop. Excludes
+/// the in-progress block so a record-setting current session doesn't define its
+/// own ceiling. Returns 0 if there's no usable history yet.
+pub fn historical_peak_block(
+    projects_dir: &Path,
+    window_hours: i64,
+    max_age: Duration,
+    now: DateTime<Utc>,
+) -> u64 {
+    let cutoff = now - max_age;
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut entries: Vec<UsageEntry> = Vec::new();
+
+    for file in WalkDir::new(projects_dir)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+        .map(|e| e.into_path())
+        .filter(|p| p.extension().map(|x| x == "jsonl").unwrap_or(false))
+    {
+        // Skip files untouched within the history window (keeps the scan bounded).
+        let recent = std::fs::metadata(&file)
+            .and_then(|m| m.modified())
+            .ok()
+            .map(|mt| DateTime::<Utc>::from(mt) >= cutoff)
+            .unwrap_or(false);
+        if !recent {
+            continue;
+        }
+        let Ok(f) = std::fs::File::open(&file) else { continue };
+        for line in BufReader::new(f).lines().map_while(Result::ok) {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
+            if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+                continue;
+            }
+            if v.get("message").and_then(|m| m.get("usage")).is_none() {
+                continue;
+            }
+            if let Some(k) = dedup_key(&v) {
+                if !seen.insert(k) {
+                    continue;
+                }
+            }
+            if let Some(e) = usage_fields(&v) {
+                entries.push(e);
+            }
+        }
+    }
+
+    entries.sort_by_key(|e| e.ts);
+    crate::blocks::group(&entries, window_hours, now)
+        .iter()
+        .filter(|b| !b.is_active)
+        .map(|b| b.total_with_cache())
+        .max()
+        .unwrap_or(0)
 }
 
 /// Classify an assistant line: a finished turn (`end_turn`) is `Done`; a turn
@@ -358,6 +435,19 @@ mod tests {
         let v = json!({"type": "user", "message": {"role": "user",
             "content": [{"type": "tool_result", "tool_use_id": "x", "content": "ok"}]}});
         assert_eq!(classify_user(&v), Awaiting::None);
+    }
+
+    #[test]
+    fn work_and_cache_split_tokens() {
+        let e = UsageEntry {
+            ts: Utc::now(),
+            input: 100,
+            output: 25,
+            cache_create: 4000,
+            cache_read: 116_000,
+        };
+        assert_eq!(e.work(), 125);
+        assert_eq!(e.cache(), 120_000);
     }
 
     #[test]

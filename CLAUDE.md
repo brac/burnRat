@@ -20,7 +20,7 @@ Rust poll loop (1s)                          Frontend (event listener)
 | File | Responsibility |
 |---|---|
 | `src-tauri/src/lib.rs` | App setup, window/tray/global-shortcut, the poll loop, `GameState`, event emit |
-| `src-tauri/src/data.rs` | Discover + incrementally tail `~/.claude/projects/**/*.jsonl`; dedup; cache file list (re-scan every 10s); classify the latest conversational line into `Awaiting` (Done / Asking / **Sent** = user-just-messaged, vs. tool-result `user` lines) + track last-activity time. **Unit-tested.** |
+| `src-tauri/src/data.rs` | Discover + incrementally tail `~/.claude/projects/**/*.jsonl`; dedup; cache file list (re-scan every 10s); classify the latest conversational line into `Awaiting` (Done / Asking / **Sent** = user-just-messaged, vs. tool-result `user` lines) + track last-activity time; `historical_peak_block` one-shot scan that auto-calibrates the usage-limit ceiling (largest completed block in recent history). **Unit-tested.** |
 | `src-tauri/src/blocks.rs` | 5-hour billing-window grouping (ccusage-equivalent); active block, consumed, projected |
 | `src-tauri/src/rate.rs` | Rolling smoothed + instant tokens/min from a monotonic work-token counter; `UnitSelector` picks the readout unit (tok/sec ↔ tok/min) with hysteresis. **Unit-tested.** |
 | `src-tauri/src/state.rs` | Creature state machine (hysteresis, onfire sustain, post-onfire `spent` crash). **Unit-tested.** |
@@ -34,7 +34,7 @@ Rust poll loop (1s)                          Frontend (event listener)
 ## Conventions
 
 - **Tunables go in `data/`**, never hardcoded in logic. `config.rs` embeds the defaults via `include_str!` *and* re-reads the live files from the repo `data/` dir in dev (resolved via `CARGO_MANIFEST_DIR`), so thresholds can be tuned without a rebuild.
-- **The burn signal is `input + output` tokens only** — cache read/creation tokens are excluded (they're ~100× larger and would peg the rat permanently hot).
+- **The burn signal mixes work + cache**, weighted by `rateCacheWeight` (default `1.0` = full cache; `0.0` = work-only). Cache tokens run ~70× larger than work, so the state thresholds in `data/thresholds.json` are calibrated for the cache-inclusive scale — **change the weight and you must retune the thresholds together** (the `$comment` there gives the work-only divisor). `consumed` (work) and `consumedWithCache` are still reported separately for the readout/limit math.
 - Art is auto-discovered from `src/sprites/` by filename convention (`main.ts`); add frames by dropping files in, no code changes. `STATE_BASE` in `main.ts` maps a state to a differently-named base (e.g. `calm` → `idle`).
 - Frontend has no business logic. If you're tempted to add a threshold or rule in TS, it belongs in Rust + `data/`. (The exception is pure *animation/presentation* timing — e.g. `FRAME_MS`, `RATE_EASE_ALPHA` — which lives in `main.ts` as view constants. The readout's *unit* choice is a rule, so it's decided in Rust; the *glide* is presentation, so it's eased in TS.)
 
