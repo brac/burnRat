@@ -20,6 +20,11 @@ Claude Code writes one JSONL file per session to `~/.claude/projects/<project>/<
 | `spent` | The crash *after* burning onfire — rate collapses and the rat slumps |
 | `waiting` | Claude is asking you something (`AskUserQuestion` / plan approval) |
 | `done` | Claude finished a turn — task complete, awaiting your next instruction |
+| `error` | Claude Code hit an API error — concerned, holds like `waiting` |
+| `refreshed` | Your 5-hour quota window just rolled over (fresh quota) — holds, then naps |
+| `approaching10`/`5`/`1` | Within 10% / 5% / 1% of your (auto-calibrated) usage limit — escalating glow |
+| `atlimit` | At your usage limit — shows a countdown to the window refresh |
+| `longrun` | A long-running session (shown over idle) |
 
 A brief **surprised** pop plays when the rat perks up from rest into work. Thresholds use hysteresis so it doesn't strobe on a noisy signal.
 

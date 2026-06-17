@@ -59,6 +59,21 @@ struct GameState {
     event: Option<&'static str>,
     /// Unit the frontend should render the rate readout in ("sec" / "min").
     rate_unit: &'static str,
+    /// Model family driving the rat's hat ("opus"/"sonnet"/"haiku"/…/"none").
+    model: &'static str,
+}
+
+/// Collapse a model id (e.g. "claude-opus-4-8") to a family the frontend maps
+/// to a hat. Returns "none" when no model has been seen yet.
+fn model_family(model: Option<&str>) -> &'static str {
+    match model {
+        Some(m) if m.contains("opus") => "opus",
+        Some(m) if m.contains("sonnet") => "sonnet",
+        Some(m) if m.contains("haiku") => "haiku",
+        Some(m) if m.contains("fable") => "fable",
+        Some(_) => "other",
+        None => "none",
+    }
 }
 
 fn apply_click_through(app: &tauri::AppHandle, on: bool) {
@@ -136,10 +151,14 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
         let mut learned_peak =
             data::historical_peak_block(&projects_dir, window_hours, history, Utc::now());
 
+        let long_running = config.thresholds.long_running_seconds;
+
         let mut monitor = DataMonitor::new(projects_dir.clone(), window_hours);
         let mut tracker = RateTracker::new(config.settings.rate_window_seconds);
         let mut unit_selector = UnitSelector::new(config.settings.display);
         let mut machine = StateMachine::new(config.thresholds.clone());
+        let mut refresh_tracker =
+            state::RefreshTracker::new(config.thresholds.refreshed_hold_seconds);
 
         // Watch the projects tree: the moment Claude writes a token we react,
         // instead of busy-polling. `interval` is just the idle fallback tick so
@@ -196,7 +215,9 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
             };
             let asking = matches!(kind, Awaiting::Asking);
             let done = matches!(kind, Awaiting::Done) && nap_idle <= done_hold;
-            let awaiting_user = done || asking;
+            // An API error holds like a question (concern pose, doesn't nap).
+            let error = matches!(kind, Awaiting::Error);
+            let awaiting_user = done || asking || error;
 
             // A fresh user message (awaiting Claude) holds the idle pose longer
             // than a plain stall, so the rat doesn't nap through the dead air
@@ -204,7 +225,7 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
             let sent = matches!(kind, Awaiting::Sent);
             let idle_hold = if sent { sent_hold } else { idle_timeout };
 
-            let (consumed, consumed_with_cache, projected, remaining, awake, recent_activity) =
+            let (consumed, consumed_with_cache, projected, remaining, base_awake, recent_activity) =
                 match active {
                     Some(b) => {
                         let token_idle = (now - b.actual_end).num_seconds();
@@ -222,7 +243,24 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
                     }
                     None => (0, 0, 0, 0, false, false),
                 };
+
+            // Quota refresh: the 5h window we were watching just rolled over.
+            // Holds the `refreshed` pose (like waiting) even though the old
+            // window went inactive, so fold it into "awake".
+            let refreshed = refresh_tracker.update(
+                blocks::latest_used_window_end(&grouped),
+                recent_activity,
+                now,
+            );
+            let awake = base_awake || refreshed;
             let is_active = awake;
+
+            // Long-running session: the active block has been going a long time.
+            // TODO: first cut — only flags age; revisit whether it should be its
+            // own sustained pose, factor in cumulative work, etc.
+            let longrun = active
+                .map(|b| (now - b.start).num_seconds() >= long_running)
+                .unwrap_or(false);
 
             // Keep adapting the ceiling if a block completes while we're running.
             let mem_completed_peak = grouped
@@ -244,10 +282,13 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
             } else {
                 0
             };
+            // 0 none, 1 within 10%, 2 within 5%, 3 within 1%, 4 at/over limit.
             let warn_level = if ceiling > 0 && active.is_some() {
                 let remaining = 1.0 - consumed_with_cache as f64 / ceiling as f64;
                 let a = &config.thresholds.approaching;
-                if remaining <= a.warn1 {
+                if remaining <= 0.0 {
+                    4
+                } else if remaining <= a.warn1 {
                     3
                 } else if remaining <= a.warn5 {
                     2
@@ -262,8 +303,28 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
 
             let (base, event) =
                 machine.update(awake, done, asking, recent_activity, smoothed, instant, now);
-            let creature = state::apply_approaching(base, warn_level);
+
+            // Final state, by priority: an API error wins; otherwise a pending
+            // question/finished turn stays; otherwise a fresh quota refresh; then
+            // the approaching-limit / at-limit warnings layer over the rate state;
+            // and a long-running session shows only when otherwise idle.
+            use state::CreatureState;
+            let creature = if error && awake {
+                CreatureState::Error
+            } else if matches!(base, CreatureState::Waiting | CreatureState::Done) {
+                base
+            } else if refreshed {
+                CreatureState::Refreshed
+            } else {
+                let warned = state::apply_approaching(base, warn_level);
+                if longrun && warned == CreatureState::Calm {
+                    CreatureState::LongRun
+                } else {
+                    warned
+                }
+            };
             let rate_unit = unit_selector.select(smoothed).as_str();
+            let model = model_family(monitor.current_model());
 
             let game = GameState {
                 smoothed_tpm: smoothed,
@@ -277,6 +338,7 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
                 state: creature.as_str(),
                 event,
                 rate_unit,
+                model,
             };
 
             let _ = app.emit("game-state", &game);

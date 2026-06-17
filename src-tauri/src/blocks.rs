@@ -84,6 +84,16 @@ pub fn active(blocks: &[Block]) -> Option<&Block> {
     blocks.iter().find(|b| b.is_active)
 }
 
+/// End time of the most recent window that saw real work — the boundary the
+/// quota-refresh watcher tracks (when `now` crosses it, fresh quota is available).
+pub fn latest_used_window_end(blocks: &[Block]) -> Option<DateTime<Utc>> {
+    blocks
+        .iter()
+        .filter(|b| b.work() > 0)
+        .map(|b| b.end)
+        .max()
+}
+
 /// Minutes remaining in the active window.
 pub fn time_remaining_min(block: &Block, now: DateTime<Utc>) -> i64 {
     (block.end - now).num_minutes().max(0)

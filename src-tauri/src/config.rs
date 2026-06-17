@@ -138,6 +138,12 @@ pub struct Thresholds {
     /// Claude) before napping — longer than `idle_timeout_seconds` so we don't
     /// nap through the "dead air" before Claude starts responding.
     pub sent_hold_seconds: i64,
+    /// How long to hold the `refreshed` pose after the 5h window rolls over
+    /// (fresh quota) before letting the rat nap.
+    pub refreshed_hold_seconds: i64,
+    /// Active-block age (seconds) beyond which a session counts as long-running.
+    /// TODO: this is a first cut — revisit the exact semantics/visual.
+    pub long_running_seconds: i64,
 }
 
 #[derive(Debug, Clone)]

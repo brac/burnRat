@@ -16,6 +16,7 @@ interface GameState {
   state: string;
   event: string | null;
   rateUnit: string; // "sec" | "min" — which unit to render the readout in
+  model: string; // model family ("opus"/"sonnet"/…/"none") → hat
 }
 
 const FRAME_MS = 280; // animation cadence; also the "1 frame" surprised duration
@@ -61,6 +62,19 @@ function framesFor(state: string): string[] {
   return FRAMES[STATE_BASE[state] ?? state] ?? FRAMES["idle"] ?? [];
 }
 
+// Per-model hats, auto-discovered from src/hats/ by model family
+// (`opus.png`, `sonnet.png`, …). TODO: no hat art exists yet — drop files in
+// and they light up automatically; until then the overlay stays hidden.
+const hatModules = import.meta.glob("./hats/*.png", {
+  eager: true,
+  query: "?url",
+  import: "default",
+}) as Record<string, string>;
+const HATS: Record<string, string> = {};
+for (const [path, url] of Object.entries(hatModules)) {
+  HATS[path.split("/").pop()!.replace(/\.png$/i, "")] = url;
+}
+
 // Preload all frames so transitions don't flash a blank.
 for (const url of Object.values(FRAMES).flat()) {
   const img = new Image();
@@ -78,15 +92,26 @@ function formatRate(tpm: number, unit: string): string {
   return tpm >= 1000 ? `${(tpm / 1000).toFixed(1)}k/min` : `${Math.round(tpm)}/min`;
 }
 
+// Countdown to the 5h window refresh, shown under the rat when at the limit.
+function formatCountdown(min: number): string {
+  if (min <= 0) return "0m";
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return h > 0 ? `${h}h${m}m` : `${m}m`;
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   const pet = document.querySelector<HTMLElement>("#pet");
   const sprite = document.querySelector<HTMLImageElement>("#sprite");
+  const hat = document.querySelector<HTMLImageElement>("#hat");
   const readout = document.querySelector<HTMLElement>("#readout");
 
   let liveState = "sleeping";
   let prevState = "sleeping";
   let surprisedUntil = 0; // show the surprised sprite until this timestamp
   let step = 0;
+  let countdownMin = 0; // minutes until window refresh (shown when at-limit)
+  let liveModel = "none";
 
   // Readout easing state, driven on its own animation-frame loop so the number
   // glides smoothly between the sparse, event-driven backend updates.
@@ -99,7 +124,10 @@ window.addEventListener("DOMContentLoaded", () => {
   function easeReadout() {
     if (readout) {
       let text = "";
-      if (rateActive) {
+      if (liveState === "atlimit") {
+        // At the limit, show the countdown to the quota refresh instead of rate.
+        text = `${formatCountdown(countdownMin)} ⏳`;
+      } else if (rateActive) {
         displayTpm += (targetTpm - displayTpm) * RATE_EASE_ALPHA;
         if (Math.abs(targetTpm - displayTpm) < 0.5) displayTpm = targetTpm; // snap when settled
         text = formatRate(displayTpm, rateUnit);
@@ -133,18 +161,35 @@ window.addEventListener("DOMContentLoaded", () => {
   listen<GameState>("game-state", (event) => {
     const s = event.payload;
 
-    // Surprised "perk-up": resting (sleeping/done/waiting/calm) -> busy.
-    const RESTING = new Set(["sleeping", "done", "waiting", "calm"]);
+    // Surprised "perk-up": resting (sleeping/done/waiting/calm/refreshed/error/
+    // longrun) -> busy.
+    const RESTING = new Set([
+      "sleeping", "done", "waiting", "calm", "refreshed", "error", "longrun",
+    ]);
     const BUSY = new Set(["working", "stressed", "onfire"]);
     if (RESTING.has(prevState) && BUSY.has(s.state)) {
       surprisedUntil = Date.now() + FRAME_MS;
     }
     prevState = s.state;
     liveState = s.state;
+    countdownMin = s.timeRemainingMin;
 
     if (pet) {
-      pet.className = `pet state-${s.state}`;
+      pet.className = `pet state-${s.state} model-${s.model}`;
       pet.style.opacity = String(s.opacity);
+    }
+
+    // Per-model hat overlay (hidden when there's no art for this model).
+    if (hat && s.model !== liveModel) {
+      liveModel = s.model;
+      const url = HATS[s.model];
+      if (url) {
+        hat.src = url;
+        hat.hidden = false;
+      } else {
+        hat.removeAttribute("src");
+        hat.hidden = true;
+      }
     }
 
     // Feed the eased readout loop; it renders on its own frame cadence.

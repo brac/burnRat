@@ -34,5 +34,9 @@
   "$doneHoldNote": "How long to hold the 'done' pose after a finished turn before the rat naps. 120 = 2 minutes.",
   "doneHoldSeconds": 120,
   "$sentHoldNote": "After the user sends a message we're awaiting Claude. Hold the idle pose this long before napping — longer than idleTimeoutSeconds so the rat doesn't nap through the 'dead air' before Claude starts responding. 180 = 3 minutes.",
-  "sentHoldSeconds": 180
+  "sentHoldSeconds": 180,
+  "$refreshedHoldNote": "After the 5h billing window rolls over (fresh quota), hold the 'refreshed' pose this long before the rat is allowed to nap. 300 = 5 minutes.",
+  "refreshedHoldSeconds": 300,
+  "$longRunningNote": "TODO: first cut. Active-block age (seconds) beyond which the session counts as long-running and shows the 'longrun' pose over idle. 14400 = 4 hours.",
+  "longRunningSeconds": 14400
 }

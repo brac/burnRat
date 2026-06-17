@@ -25,6 +25,9 @@ pub enum Awaiting {
     Done,
     Asking,
     Sent,
+    /// Claude Code surfaced an API error (`isApiErrorMessage`). Treated like a
+    /// question — the rat shows concern and holds rather than napping.
+    Error,
 }
 
 /// Interactive tools that block on the user — treated as "asking".
@@ -81,6 +84,9 @@ pub struct DataMonitor {
     /// The most recent conversational line seen (across all sessions): its
     /// timestamp and what kind of awaiting-user signal it is.
     latest_conv: Option<(DateTime<Utc>, Awaiting)>,
+    /// Model id of the most recent assistant line (e.g. "claude-opus-4-8"),
+    /// used to pick the rat's hat.
+    latest_model: Option<String>,
 }
 
 impl DataMonitor {
@@ -96,7 +102,13 @@ impl DataMonitor {
             files: Vec::new(),
             last_scan: None,
             latest_conv: None,
+            latest_model: None,
         }
+    }
+
+    /// The model id of the most recent assistant line, if any.
+    pub fn current_model(&self) -> Option<&str> {
+        self.latest_model.as_deref()
     }
 
     /// What Claude is awaiting from the user, based on the most recent
@@ -248,7 +260,25 @@ impl DataMonitor {
         let Some(ts) = parse_ts(v) else {
             return;
         };
-        let awaiting = if line_type == "assistant" {
+        // Remember the model so the frontend can pick a hat. Only assistant
+        // lines carry `message.model`.
+        if line_type == "assistant" {
+            if let Some(m) = v.get("message").and_then(|m| m.get("model")).and_then(|x| x.as_str()) {
+                self.latest_model = Some(m.to_string());
+            }
+        }
+
+        // An API error (overloaded, bad model, etc.) is flagged on the assistant
+        // line. Treat it like a question: the rat shows concern and holds.
+        // TODO: only assistant-typed error lines are seen here; if Claude Code
+        // ever emits errors under another `type`, widen this check.
+        let is_api_error = v
+            .get("isApiErrorMessage")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        let awaiting = if is_api_error {
+            Awaiting::Error
+        } else if line_type == "assistant" {
             classify_assistant(v)
         } else {
             classify_user(v)
@@ -435,6 +465,37 @@ mod tests {
         let v = json!({"type": "user", "message": {"role": "user",
             "content": [{"type": "tool_result", "tool_use_id": "x", "content": "ok"}]}});
         assert_eq!(classify_user(&v), Awaiting::None);
+    }
+
+    #[test]
+    fn api_error_line_sets_error_and_model() {
+        let mut m = DataMonitor::new(PathBuf::from("."), 5);
+        let v = json!({
+            "type": "assistant",
+            "timestamp": "2026-06-17T10:00:00Z",
+            "isApiErrorMessage": true,
+            "message": {"role": "assistant", "model": "claude-opus-4-8",
+                "content": [{"type": "text", "text": "overloaded"}]}
+        });
+        m.note_conversational(&v);
+        assert_eq!(m.awaiting(), Awaiting::Error);
+        assert_eq!(m.current_model(), Some("claude-opus-4-8"));
+    }
+
+    // Booting-into-a-state relies on these classifications: on first poll the
+    // tail reads the existing file and `awaiting()` reflects its last line.
+    #[test]
+    fn interactive_tool_is_asking() {
+        let v = json!({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "AskUserQuestion"}
+        ]}});
+        assert_eq!(classify_assistant(&v), Awaiting::Asking);
+    }
+
+    #[test]
+    fn end_turn_is_done() {
+        let v = json!({"message": {"stop_reason": "end_turn"}});
+        assert_eq!(classify_assistant(&v), Awaiting::Done);
     }
 
     #[test]

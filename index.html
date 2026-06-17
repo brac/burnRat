@@ -12,7 +12,11 @@
          or Ctrl+Shift+M), dragging the rat repositions the window. Children use
          pointer-events:none so the whole rat is the drag handle. -->
     <div id="pet" class="pet state-sleeping" data-tauri-drag-region>
-      <img id="sprite" class="sprite" alt="" draggable="false" />
+      <div class="stack">
+        <img id="sprite" class="sprite" alt="" draggable="false" />
+        <!-- Per-model hat overlay; hidden until a hat image exists for the model. -->
+        <img id="hat" class="hat" alt="" draggable="false" hidden />
+      </div>
       <div id="readout" class="readout"></div>
     </div>
   </body>

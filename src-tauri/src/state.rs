@@ -25,6 +25,10 @@ pub enum CreatureState {
     Approaching10,
     Approaching5,
     Approaching1,
+    AtLimit,
+    Refreshed,
+    Error,
+    LongRun,
 }
 
 impl CreatureState {
@@ -41,6 +45,10 @@ impl CreatureState {
             CreatureState::Approaching10 => "approaching10",
             CreatureState::Approaching5 => "approaching5",
             CreatureState::Approaching1 => "approaching1",
+            CreatureState::AtLimit => "atlimit",
+            CreatureState::Refreshed => "refreshed",
+            CreatureState::Error => "error",
+            CreatureState::LongRun => "longrun",
         }
     }
 }
@@ -48,16 +56,18 @@ impl CreatureState {
 /// Layer an approaching-limit warning over the resolved creature state.
 ///
 /// `level` is the most-severe band the user is in: 0 none, 1 = within 10%,
-/// 2 = within 5%, 3 = within 1%. The warning only replaces certain base states
-/// (louder as it escalates): 10% shows over idle only; 5% over idle + working;
-/// 1% over everything *except* the resting/awaiting poses (sleeping, waiting,
-/// done) — those are never overridden at any level.
+/// 2 = within 5%, 3 = within 1%, 4 = at/over the limit. The warning only
+/// replaces certain base states (louder as it escalates): 10% shows over idle
+/// only; 5% over idle + working; 1% and at-limit over everything *except* the
+/// resting/awaiting poses (sleeping, waiting, done) — those are never
+/// overridden at any level.
 pub fn apply_approaching(base: CreatureState, level: u8) -> CreatureState {
     use CreatureState::*;
     if matches!(base, Sleeping | Waiting | Done) {
         return base;
     }
     match level {
+        4 => AtLimit,
         3 => Approaching1,
         2 => match base {
             Calm | Working => Approaching5,
@@ -68,6 +78,67 @@ pub fn apply_approaching(base: CreatureState, level: u8) -> CreatureState {
             _ => base,
         },
         _ => base,
+    }
+}
+
+/// Tracks the 5-hour-window boundary so we can show a one-off "quota refreshed"
+/// pose. When a window we watched go active reaches its end (fresh quota now
+/// available) while the user is idle, we hold `Refreshed` for `hold`, then let
+/// the rat nap. Work resuming clears it immediately. Mirrors how `done`/`asking`
+/// are computed in the poll loop and applied on top of the rate machine.
+pub struct RefreshTracker {
+    hold: Duration,
+    /// End of the latest used window we're tracking.
+    cur_end: Option<DateTime<Utc>>,
+    /// Whether we observed that window *before* it expired (suppresses a stale
+    /// "refresh" if the app starts up after a window already lapsed).
+    saw_active: bool,
+    /// When the current refresh hold started, if any.
+    refreshed_since: Option<DateTime<Utc>>,
+}
+
+impl RefreshTracker {
+    pub fn new(hold_seconds: i64) -> Self {
+        RefreshTracker {
+            hold: Duration::seconds(hold_seconds.max(0)),
+            cur_end: None,
+            saw_active: false,
+            refreshed_since: None,
+        }
+    }
+
+    /// Advance one tick; returns whether to show the `Refreshed` pose now.
+    pub fn update(
+        &mut self,
+        latest_used_end: Option<DateTime<Utc>>,
+        recent_activity: bool,
+        now: DateTime<Utc>,
+    ) -> bool {
+        if latest_used_end != self.cur_end {
+            self.cur_end = latest_used_end;
+            self.saw_active = latest_used_end.map_or(false, |e| now < e);
+        }
+        if recent_activity {
+            self.refreshed_since = None; // work resumed — drop the celebration
+        }
+        if self.saw_active {
+            if let Some(end) = self.cur_end {
+                if now >= end {
+                    self.saw_active = false;
+                    if !recent_activity {
+                        self.refreshed_since = Some(now);
+                    }
+                }
+            }
+        }
+        match self.refreshed_since {
+            Some(t) if now - t <= self.hold && !recent_activity => true,
+            Some(_) => {
+                self.refreshed_since = None;
+                false
+            }
+            None => false,
+        }
     }
 }
 
@@ -257,6 +328,8 @@ mod tests {
             idle_timeout_seconds: 90,
             done_hold_seconds: 120,
             sent_hold_seconds: 180,
+            refreshed_hold_seconds: 300,
+            long_running_seconds: 14400,
         }
     }
 
@@ -407,5 +480,51 @@ mod tests {
     fn no_warning_passes_state_through() {
         assert_eq!(apply_approaching(Working, 0), Working);
         assert_eq!(apply_approaching(Calm, 0), Calm);
+    }
+
+    #[test]
+    fn at_limit_overrides_active_states_but_not_resting() {
+        assert_eq!(apply_approaching(Working, 4), AtLimit);
+        assert_eq!(apply_approaching(OnFire, 4), AtLimit);
+        assert_eq!(apply_approaching(Sleeping, 4), Sleeping);
+        assert_eq!(apply_approaching(Waiting, 4), Waiting);
+        assert_eq!(apply_approaching(Done, 4), Done);
+    }
+
+    fn secs(n: i64) -> DateTime<Utc> {
+        DateTime::<Utc>::from_timestamp(n, 0).unwrap()
+    }
+
+    #[test]
+    fn refresh_fires_when_observed_window_expires() {
+        let mut r = RefreshTracker::new(300);
+        let end = secs(1000);
+        // Observe the window while it's still active (now < end): no refresh yet.
+        assert!(!r.update(Some(end), false, secs(900)));
+        // Boundary passes while idle → refreshed.
+        assert!(r.update(Some(end), false, secs(1001)));
+        // Holds for the duration...
+        assert!(r.update(Some(end), false, secs(1200)));
+        // ...then stops after the hold elapses.
+        assert!(!r.update(Some(end), false, secs(1400)));
+    }
+
+    #[test]
+    fn refresh_suppressed_if_window_already_expired_at_first_sight() {
+        let mut r = RefreshTracker::new(300);
+        let end = secs(1000);
+        // First time we see this window it's already past its end → no celebration.
+        assert!(!r.update(Some(end), false, secs(1001)));
+        assert!(!r.update(Some(end), false, secs(1002)));
+    }
+
+    #[test]
+    fn refresh_clears_when_work_resumes() {
+        let mut r = RefreshTracker::new(300);
+        let end = secs(1000);
+        assert!(!r.update(Some(end), false, secs(900)));
+        assert!(r.update(Some(end), false, secs(1001)));
+        // A token lands (recent_activity) → drop the refreshed pose immediately.
+        assert!(!r.update(Some(end), true, secs(1002)));
     }
 }
