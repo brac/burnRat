@@ -23,6 +23,8 @@ Claude Code writes one JSONL file per session to `~/.claude/projects/<project>/<
 
 A brief **surprised** pop plays when the rat perks up from rest into work. Thresholds use hysteresis so it doesn't strobe on a noisy signal.
 
+**Napping is smart about your messages.** The nap clock runs from the last conversational line (yours *or* Claude's), so sending a message resets it — no jarring `done → message → nap`. Right after you send a message the rat holds the idle pose longer (`sentHoldSeconds`, default 3 min) so it doesn't nap through the dead air before Claude starts responding, then naps if nothing happens.
+
 ### Sprites
 
 Frames live in [`src/sprites/`](src/sprites/) and are auto-discovered by filename: drop in `<state>.png` plus optional `<state>_1.png`, `<state>_2.png`, … and they're grouped into that state's loop automatically (1 frame = static, 2 = alternate, 3+ = smooth ping-pong). No code changes needed — new files are picked up on the next dev reload / build.
@@ -70,8 +72,10 @@ Produces a `.msi`/`.exe` on Windows and a `.app`/`.dmg` on macOS.
 
 All the magic numbers live in [`data/`](data/) and are read live in `dev` (no rebuild needed):
 
-- **`data/thresholds.json`** — burn-rate cutoffs per state (with up/down hysteresis), the onfire sustain time, the post-onfire `spent` crash, and `idleTimeoutSeconds` (how long with no tokens before the rat sleeps).
-- **`data/settings.default.json`** — poll interval, rate smoothing window, 5-hour block window, default opacity, and whether it starts interactive or pass-through.
+- **`data/thresholds.json`** — burn-rate cutoffs per state (with up/down hysteresis), the onfire sustain time, the post-onfire `spent` crash, and the nap/hold timers: `idleTimeoutSeconds` (idle grace before the rat sleeps), `doneHoldSeconds` (how long the `done` pose holds after a finished turn), and `sentHoldSeconds` (how long the rat holds the idle pose after you send a message — longer, so it doesn't nap through the "dead air" before Claude responds).
+- **`data/settings.default.json`** — poll interval, rate smoothing window, 5-hour block window, default opacity, whether it starts interactive or pass-through, and `display` (the tok/sec↔tok/min auto-scale cutoffs for the readout).
+
+The rate readout under the rat **auto-scales** between tokens/sec and tokens/min (with hysteresis so the unit doesn't flip-flop) and is **display-eased** on an animation-frame loop so the number glides smoothly over Claude's chunky, per-turn token writes — the underlying data smoothing is still `rateWindowSeconds`.
 
 User-changed settings (opacity) persist to your OS app-config dir; defaults are bundled into the binary.
 

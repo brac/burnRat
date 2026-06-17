@@ -24,6 +24,19 @@ pub struct Settings {
     pub plan: String,
     pub opacity: f64,
     pub click_through: bool,
+    pub display: DisplayCfg,
+}
+
+/// Rate-readout auto-scale cutoffs (tokens/min). The readout prefers tok/sec and
+/// drops to tok/min only at low rates; the gap between the two cutoffs is
+/// hysteresis so the displayed unit doesn't flip-flop on a noisy signal.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayCfg {
+    /// At or above this smoothed rate (tok/min), show tok/sec.
+    pub per_sec_above_tpm: f64,
+    /// Below this smoothed rate (tok/min), show tok/min.
+    pub per_min_below_tpm: f64,
 }
 
 impl Settings {
@@ -87,6 +100,12 @@ pub struct Thresholds {
     pub activity_floor_seconds: i64,
     /// Idle grace (seconds without new tokens) before the rat naps to sleep.
     pub idle_timeout_seconds: i64,
+    /// How long to hold the `done` pose after a finished turn before napping.
+    pub done_hold_seconds: i64,
+    /// How long to hold the idle pose after the user sends a message (awaiting
+    /// Claude) before napping — longer than `idle_timeout_seconds` so we don't
+    /// nap through the "dead air" before Claude starts responding.
+    pub sent_hold_seconds: i64,
 }
 
 #[derive(Debug, Clone)]

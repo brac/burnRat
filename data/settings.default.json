@@ -8,5 +8,10 @@
   "plan": "max5",
   "opacity": 1.0,
   "clickThrough": false,
-  "position": { "x": null, "y": null }
+  "position": { "x": null, "y": null },
+  "display": {
+    "$note": "Rate-readout auto-scale. Prefer tok/sec (granular); drop to tok/min only when the per-second value would round below ~1. The gap between the two cutoffs is hysteresis so the unit doesn't flip-flop on a noisy signal.",
+    "perSecAboveTpm": 90,
+    "perMinBelowTpm": 50
+  }
 }

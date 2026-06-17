@@ -13,14 +13,18 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Duration, Utc};
 use walkdir::WalkDir;
 
-/// Why the rat is idle-awaiting-user, derived from the latest conversational
-/// line. `Done` = Claude finished its turn (task complete). `Asking` = Claude is
-/// actively asking the user something (AskUserQuestion / ExitPlanMode).
+/// What the latest conversational line implies about who we're waiting on.
+/// `Done` = Claude finished its turn (task complete, awaiting user). `Asking` =
+/// Claude is actively asking the user something (AskUserQuestion / ExitPlanMode).
+/// `Sent` = the user just sent a message and we're awaiting Claude — the rat
+/// holds the idle pose longer here so we don't nap through the "dead air" before
+/// Claude starts responding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Awaiting {
     None,
     Done,
     Asking,
+    Sent,
 }
 
 /// Interactive tools that block on the user — treated as "asking".
@@ -90,6 +94,13 @@ impl DataMonitor {
     /// call → Asking; anything else / a newer user line → None).
     pub fn awaiting(&self) -> Awaiting {
         self.latest_conv.map(|(_, a)| a).unwrap_or(Awaiting::None)
+    }
+
+    /// Timestamp of the most recent conversational line (user *or* assistant).
+    /// Unlike the last token time, this advances when the user sends a message,
+    /// so it can drive a nap clock that resets on user activity.
+    pub fn last_activity(&self) -> Option<DateTime<Utc>> {
+        self.latest_conv.map(|(ts, _)| ts)
     }
 
     /// Resolve `~/.claude/projects`, honoring `BURNRAT_PROJECTS_DIR` for tests.
@@ -229,7 +240,7 @@ impl DataMonitor {
         let awaiting = if line_type == "assistant" {
             classify_assistant(v)
         } else {
-            Awaiting::None
+            classify_user(v)
         };
         if self.latest_conv.map_or(true, |(prev, _)| ts >= prev) {
             self.latest_conv = Some((ts, awaiting));
@@ -292,10 +303,69 @@ fn classify_assistant(v: &serde_json::Value) -> Awaiting {
     Awaiting::None
 }
 
+/// Classify a `user` line: a genuine typed message is `Sent` (awaiting Claude);
+/// a tool-result line — which Claude Code also records as `type: "user"` — is
+/// mid-work, so `None`. A real message's content is either a string or an array
+/// holding at least one non-`tool_result` block (text/image); a pure tool result
+/// is an array of only `tool_result` blocks.
+fn classify_user(v: &serde_json::Value) -> Awaiting {
+    match v.get("message").and_then(|m| m.get("content")) {
+        Some(serde_json::Value::String(_)) => Awaiting::Sent,
+        Some(serde_json::Value::Array(blocks)) => {
+            let has_message = blocks.iter().any(|b| {
+                b.get("type").and_then(|t| t.as_str()) != Some("tool_result")
+            });
+            if has_message {
+                Awaiting::Sent
+            } else {
+                Awaiting::None
+            }
+        }
+        _ => Awaiting::None,
+    }
+}
+
 /// Parse a line's RFC3339 `timestamp` field into UTC.
 fn parse_ts(v: &serde_json::Value) -> Option<DateTime<Utc>> {
     v.get("timestamp")
         .and_then(|x| x.as_str())
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .map(|dt| dt.with_timezone(&Utc))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn plain_text_message_is_sent() {
+        let v = json!({"type": "user", "message": {"role": "user", "content": "hello"}});
+        assert_eq!(classify_user(&v), Awaiting::Sent);
+    }
+
+    #[test]
+    fn text_block_message_is_sent() {
+        let v = json!({"type": "user", "message": {"role": "user",
+            "content": [{"type": "text", "text": "hi"}]}});
+        assert_eq!(classify_user(&v), Awaiting::Sent);
+    }
+
+    #[test]
+    fn tool_result_is_not_sent() {
+        // Claude Code records tool results as type:"user" — these are mid-work,
+        // not a fresh message, so they must not extend the idle hold.
+        let v = json!({"type": "user", "message": {"role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "x", "content": "ok"}]}});
+        assert_eq!(classify_user(&v), Awaiting::None);
+    }
+
+    #[test]
+    fn mixed_content_with_text_is_sent() {
+        let v = json!({"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "x", "content": "ok"},
+            {"type": "text", "text": "and also do this"}
+        ]}});
+        assert_eq!(classify_user(&v), Awaiting::Sent);
+    }
 }

@@ -220,6 +220,8 @@ mod tests {
             spike: SpikeCfg { instant_tpm_flinch: 80000.0 },
             activity_floor_seconds: 15,
             idle_timeout_seconds: 90,
+            done_hold_seconds: 120,
+            sent_hold_seconds: 180,
         }
     }
 

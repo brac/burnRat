@@ -18,7 +18,7 @@ use tauri::{
 
 use crate::config::Config;
 use crate::data::{Awaiting, DataMonitor};
-use crate::rate::RateTracker;
+use crate::rate::{RateTracker, UnitSelector};
 use crate::state::StateMachine;
 use crate::userconfig::UserConfig;
 
@@ -57,6 +57,8 @@ struct GameState {
     opacity: f64,
     state: &'static str,
     event: Option<&'static str>,
+    /// Unit the frontend should render the rate readout in ("sec" / "min").
+    rate_unit: &'static str,
 }
 
 fn apply_click_through(app: &tauri::AppHandle, on: bool) {
@@ -119,9 +121,12 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
 
         let idle_timeout = config.thresholds.idle_timeout_seconds;
         let activity_floor = config.thresholds.activity_floor_seconds;
+        let done_hold = config.thresholds.done_hold_seconds;
+        let sent_hold = config.thresholds.sent_hold_seconds;
 
         let mut monitor = DataMonitor::new(projects_dir.clone(), window_hours);
         let mut tracker = RateTracker::new(config.settings.rate_window_seconds);
+        let mut unit_selector = UnitSelector::new(config.settings.display);
         let mut machine = StateMachine::new(config.thresholds.clone());
 
         // Watch the projects tree: the moment Claude writes a token we react,
@@ -156,29 +161,47 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
             // "awake" = there's an active window AND tokens flowed recently. After
             // idle_timeout seconds without new tokens the rat naps (sleeping),
             // rather than waiting the full 5h for the window to lapse.
-            // What Claude is awaiting from the user (a finished turn → done, an
-            // interactive question → asking). Both hold without napping.
+            // Smart napping: the nap clock runs from the last conversational line
+            // (user OR assistant), so sending a message resets it — no jarring
+            // done -> message -> nap. The activity floor (perk-up to working) still
+            // runs from the last *token*, so a user message alone isn't "working".
+            let nap_idle = monitor
+                .last_activity()
+                .map(|t| (now - t).num_seconds())
+                .unwrap_or(i64::MAX);
+
+            // What Claude is awaiting from the user. `asking` (an open question)
+            // holds indefinitely; `done` (a finished turn) holds for done_hold
+            // seconds, then is allowed to nap.
             let kind = if active.is_some() {
                 monitor.awaiting()
             } else {
                 Awaiting::None
             };
-            let done = matches!(kind, Awaiting::Done);
             let asking = matches!(kind, Awaiting::Asking);
+            let done = matches!(kind, Awaiting::Done) && nap_idle <= done_hold;
             let awaiting_user = done || asking;
+
+            // A fresh user message (awaiting Claude) holds the idle pose longer
+            // than a plain stall, so the rat doesn't nap through the dead air
+            // before Claude starts responding.
+            let sent = matches!(kind, Awaiting::Sent);
+            let idle_hold = if sent { sent_hold } else { idle_timeout };
 
             let (consumed, consumed_with_cache, projected, remaining, awake, recent_activity) =
                 match active {
                     Some(b) => {
-                        let idle_secs = (now - b.actual_end).num_seconds();
+                        let token_idle = (now - b.actual_end).num_seconds();
                         (
                             b.work(),
                             b.total_with_cache(),
                             blocks::projected_work(b, smoothed, now),
                             blocks::time_remaining_min(b, now),
-                            // Awaiting the user never naps; otherwise nap after timeout.
-                            awaiting_user || idle_secs <= idle_timeout,
-                            idle_secs <= activity_floor,
+                            // Awaiting the user holds; otherwise nap after the
+                            // idle hold (longer right after a user message)
+                            // measured from the last conversational line.
+                            awaiting_user || nap_idle <= idle_hold,
+                            token_idle <= activity_floor,
                         )
                     }
                     None => (0, 0, 0, 0, false, false),
@@ -187,6 +210,7 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
 
             let (creature, event) =
                 machine.update(awake, done, asking, recent_activity, smoothed, instant, now);
+            let rate_unit = unit_selector.select(smoothed).as_str();
 
             let game = GameState {
                 smoothed_tpm: smoothed,
@@ -199,6 +223,7 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
                 opacity,
                 state: creature.as_str(),
                 event,
+                rate_unit,
             };
 
             let _ = app.emit("game-state", &game);
