@@ -2,7 +2,7 @@
 
 A transparent desktop pet that reacts to your live **Claude Code token burn rate**. The harder you hammer Claude, the more the rat panics — calm → working → stressed → on fire — and when you burn out hot then stop, it slumps spent. Lightweight, always-on-top, draggable, cross-platform (macOS + Windows).
 
-burnRat is an *ambient companion*, not a dashboard. It floats over whatever you're working in and translates your token consumption into a creature state. The reactive pet is the point; the numbers are secondary.
+burnRat is an *ambient companion*, not a dashboard. It floats over whatever you're working in and translates your token consumption into a creature state. The reactive pet is the point; the numbers are secondary. Unlike the usual desktop pets that wander around at random, burnRat is wired to real telemetry — it only reacts to what you're actually doing to Claude.
 
 ---
 
@@ -28,7 +28,7 @@ Claude Code writes one JSONL file per session to `~/.claude/projects/<project>/<
 
 A brief **surprised** pop plays when the rat perks up from rest into work. Thresholds use hysteresis so it doesn't strobe on a noisy signal.
 
-**Napping is smart about your messages.** The nap clock runs from the last conversational line (yours *or* Claude's), so sending a message resets it — no jarring `done → message → nap`. Right after you send a message the rat holds the idle pose longer (`sentHoldSeconds`, default 3 min) so it doesn't nap through the dead air before Claude starts responding, then naps if nothing happens.
+**Napping is smart about your messages.** The nap clock runs from the last conversational line (yours *or* Claude's), so sending a message resets it — no jarring `done → message → nap`. Right after you send a message the rat holds the idle pose longer (`sentHoldSeconds`, default 3 min) so it doesn't nap through the dead air before Claude starts responding, then naps if nothing happens. The rat also won't nap while the burn rate is still elevated — it always winds down through its lower states (e.g. `onfire → stressed → working → calm → sleeping`) rather than snapping straight from a high state into a nap.
 
 ### Sprites
 
@@ -96,4 +96,5 @@ User-changed settings (opacity) persist to your OS app-config dir; defaults are 
 
 ## License
 
-[MIT](LICENSE)
+- **Code:** [MIT](LICENSE).
+- **Art:** the sprite and hat artwork in [`src/sprites/`](src/sprites/) and [`src/hats/`](src/hats/) is **not** covered by the MIT license — © the burnRat authors, all rights reserved. Please don't redistribute or reuse the art without permission.

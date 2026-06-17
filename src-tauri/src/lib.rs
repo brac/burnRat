@@ -152,6 +152,10 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
             data::historical_peak_block(&projects_dir, window_hours, history, Utc::now());
 
         let long_running = config.thresholds.long_running_seconds;
+        // Rate floor below which the rat is no longer "visibly working": the
+        // working-state exit (down) cutoff. Used to keep the rat awake while the
+        // burn rate is still elevated (see the nap gate in the loop).
+        let working_floor = config.thresholds.states.working.down;
 
         let mut monitor = DataMonitor::new(projects_dir.clone(), window_hours);
         let mut tracker = RateTracker::new(config.settings.rate_window_seconds);
@@ -252,7 +256,18 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
                 recent_activity,
                 now,
             );
-            let awake = base_awake || refreshed;
+            // Don't nap while the rat is still visibly burning. The nap clock
+            // (nap_idle) is purely time-since-last-conversational-line, but that
+            // line's timestamp can already be stale relative to wall-clock `now`
+            // — e.g. a single long turn lands one line carrying a big token jump
+            // (spiking the smoothed rate to stressed/onfire) whose timestamp
+            // predates now by more than idle_timeout. Without this gate the rat
+            // snaps straight from stressed/onfire to sleeping, skipping the
+            // natural decay. Stay awake until the rate falls out of the working
+            // band so it always glides down (stressed -> working -> calm -> sleep,
+            // or the post-onfire spent crash) instead of cutting to a nap.
+            let burning = smoothed >= working_floor;
+            let awake = base_awake || refreshed || burning;
             let is_active = awake;
 
             // Long-running session: the active block has been going a long time.
