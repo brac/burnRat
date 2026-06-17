@@ -1,0 +1,61 @@
+/* burnRat — transparent floating-pet styles.
+   The window background MUST stay fully transparent; only the sprite is visible. */
+
+:root {
+  color-scheme: light dark;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent !important;
+  overflow: hidden;
+  cursor: default;
+  user-select: none;
+}
+
+#pet {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  /* The rat is interactive by default — click and drag it anywhere. */
+  cursor: grab;
+}
+#pet:active {
+  cursor: grabbing;
+}
+
+.sprite {
+  width: 150px;
+  height: 150px;
+  object-fit: contain;
+  image-rendering: auto;
+  /* Mirror the art so the rat faces the other way. */
+  /*transform: scaleX(-1);*/
+  filter: drop-shadow(0 3px 4px rgba(0, 0, 0, 0.4));
+  /* Children don't capture the mouse, so the whole #pet is the drag handle. */
+  pointer-events: none;
+}
+
+.readout {
+  font-family: ui-monospace, "Cascadia Code", "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+  text-align: center;
+  white-space: pre;
+  pointer-events: none;
+}
+
+/* Sprites are static art (no scaling); the working state animates via frame
+   cycling in JS. Onfire keeps a glow — that's a filter, not a scale. */
+.state-onfire .sprite {
+  filter: drop-shadow(0 0 12px rgba(255, 90, 0, 0.95));
+}

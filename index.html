@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>burnRat</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+  <body>
+    <!-- data-tauri-drag-region: when in move mode (click-through OFF, via tray
+         or Ctrl+Shift+M), dragging the rat repositions the window. Children use
+         pointer-events:none so the whole rat is the drag handle. -->
+    <div id="pet" class="pet state-sleeping" data-tauri-drag-region>
+      <img id="sprite" class="sprite" alt="" draggable="false" />
+      <div id="readout" class="readout"></div>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,27 @@
+{
+  "$comment": "Creature-state thresholds on the SMOOTHED burn rate (tokens/min, input+output only; cache excluded). Calibrated against real Claude Code sessions: idle=0, light work ~1-7k/min, heavy bursts ~28k/min. Each state has separate up/down cutoffs (hysteresis) so a noisy signal does not strobe. Tune freely — read live in dev, no rebuild needed.",
+  "states": {
+    "sleeping": { "$note": "entered when no active block; not rate-driven" },
+    "calm":     { "up": 0,     "down": 0 },
+    "working":  { "up": 1500,  "down": 800 },
+    "stressed": { "up": 8000,  "down": 5500 },
+    "onfire":   { "up": 25000, "down": 18000 }
+  },
+  "onfire": {
+    "$note": "onfire requires the high rate to be sustained, not a single spike",
+    "sustainedSeconds": 12
+  },
+  "spent": {
+    "$note": "spent = the crash AFTER burning hot: when the rate collapses below rateThreshold within afterOnfireSeconds of being onfire, the rat is spent for durationSeconds (then relaxes to calm). NOT tied to quota exhaustion.",
+    "rateThreshold": 1500,
+    "afterOnfireSeconds": 90,
+    "durationSeconds": 20
+  },
+  "spike": {
+    "$note": "instant-rate jump (tokens/min) above this triggers a transient flinch bounce",
+    "instantTpmFlinch": 80000
+  },
+  "$activityFloorNote": "Fast-attack perk-up: if a token was written within this many seconds, the rat is at least 'working' immediately (don't wait for the smoothed rate to climb). Higher states still come from the smoothed rate.",
+  "activityFloorSeconds": 15,
+  "idleTimeoutSeconds": 150
+}

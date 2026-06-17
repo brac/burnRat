@@ -1,0 +1,12 @@
+{
+  "$comment": "Default settings for burnRat. User overrides are written to settings.json (gitignored). All values here are safe, tunable magic numbers — no logic depends on hardcoded numbers elsewhere.",
+  "pollIntervalSeconds": 1,
+  "pollIntervalMinSeconds": 1,
+  "pollIntervalMaxSeconds": 10,
+  "rateWindowSeconds": 15,
+  "blockWindowHours": 5,
+  "plan": "max5",
+  "opacity": 1.0,
+  "clickThrough": false,
+  "position": { "x": null, "y": null }
+}
