@@ -13,6 +13,19 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Duration, Utc};
 use walkdir::WalkDir;
 
+/// Why the rat is idle-awaiting-user, derived from the latest conversational
+/// line. `Done` = Claude finished its turn (task complete). `Asking` = Claude is
+/// actively asking the user something (AskUserQuestion / ExitPlanMode).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Awaiting {
+    None,
+    Done,
+    Asking,
+}
+
+/// Interactive tools that block on the user — treated as "asking".
+const INTERACTIVE_TOOLS: [&str; 2] = ["AskUserQuestion", "ExitPlanMode"];
+
 /// One usage record extracted from an assistant turn.
 #[derive(Debug, Clone)]
 pub struct UsageEntry {
@@ -52,6 +65,9 @@ pub struct DataMonitor {
     /// Cached list of JSONL files, refreshed every RESCAN_SECS.
     files: Vec<PathBuf>,
     last_scan: Option<DateTime<Utc>>,
+    /// The most recent conversational line seen (across all sessions): its
+    /// timestamp and what kind of awaiting-user signal it is.
+    latest_conv: Option<(DateTime<Utc>, Awaiting)>,
 }
 
 impl DataMonitor {
@@ -65,7 +81,15 @@ impl DataMonitor {
             retention: Duration::hours(block_window_hours + 1),
             files: Vec::new(),
             last_scan: None,
+            latest_conv: None,
         }
+    }
+
+    /// What Claude is awaiting from the user, based on the most recent
+    /// conversational line (assistant `end_turn` → Done; an interactive tool
+    /// call → Asking; anything else / a newer user line → None).
+    pub fn awaiting(&self) -> Awaiting {
+        self.latest_conv.map(|(_, a)| a).unwrap_or(Awaiting::None)
     }
 
     /// Resolve `~/.claude/projects`, honoring `BURNRAT_PROJECTS_DIR` for tests.
@@ -177,10 +201,13 @@ impl DataMonitor {
                 break;
             }
             pos += bytes as u64;
-            if let Some(entry) = self.parse_line(&line) {
-                self.cumulative_work += entry.work();
-                self.entries.push(entry);
-                added += 1;
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+                self.note_conversational(&v);
+                if let Some(entry) = self.usage_entry(&v) {
+                    self.cumulative_work += entry.work();
+                    self.entries.push(entry);
+                    added += 1;
+                }
             }
         }
 
@@ -188,8 +215,28 @@ impl DataMonitor {
         added
     }
 
-    fn parse_line(&mut self, line: &str) -> Option<UsageEntry> {
-        let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    /// Track the latest conversational (assistant/user) line so we can tell when
+    /// Claude has finished its turn and is awaiting input. Meta line types
+    /// (ai-title, mode, …) are ignored; they mostly lack timestamps anyway.
+    fn note_conversational(&mut self, v: &serde_json::Value) {
+        let line_type = match v.get("type").and_then(|x| x.as_str()) {
+            Some(k @ ("assistant" | "user")) => k,
+            _ => return,
+        };
+        let Some(ts) = parse_ts(v) else {
+            return;
+        };
+        let awaiting = if line_type == "assistant" {
+            classify_assistant(v)
+        } else {
+            Awaiting::None
+        };
+        if self.latest_conv.map_or(true, |(prev, _)| ts >= prev) {
+            self.latest_conv = Some((ts, awaiting));
+        }
+    }
+
+    fn usage_entry(&mut self, v: &serde_json::Value) -> Option<UsageEntry> {
         if v.get("type")?.as_str()? != "assistant" {
             return None;
         }
@@ -208,11 +255,7 @@ impl DataMonitor {
             }
         }
 
-        let ts = v
-            .get("timestamp")
-            .and_then(|x| x.as_str())
-            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-            .map(|dt| dt.with_timezone(&Utc))?;
+        let ts = parse_ts(v)?;
 
         let n = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
         Some(UsageEntry {
@@ -223,4 +266,36 @@ impl DataMonitor {
             cache_read: n("cache_read_input_tokens"),
         })
     }
+}
+
+/// Classify an assistant line: a finished turn (`end_turn`) is `Done`; a turn
+/// whose tool call is an interactive tool is `Asking`; otherwise `None` (mid-work).
+fn classify_assistant(v: &serde_json::Value) -> Awaiting {
+    let msg = v.get("message");
+    let stop = msg
+        .and_then(|m| m.get("stop_reason"))
+        .and_then(|s| s.as_str());
+    if stop == Some("end_turn") {
+        return Awaiting::Done;
+    }
+    if let Some(content) = msg.and_then(|m| m.get("content")).and_then(|c| c.as_array()) {
+        for block in content {
+            if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                if let Some(name) = block.get("name").and_then(|n| n.as_str()) {
+                    if INTERACTIVE_TOOLS.contains(&name) {
+                        return Awaiting::Asking;
+                    }
+                }
+            }
+        }
+    }
+    Awaiting::None
+}
+
+/// Parse a line's RFC3339 `timestamp` field into UTC.
+fn parse_ts(v: &serde_json::Value) -> Option<DateTime<Utc>> {
+    v.get("timestamp")
+        .and_then(|x| x.as_str())
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&Utc))
 }

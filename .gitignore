@@ -15,6 +15,9 @@ dist-ssr
 # burnRat user settings (overrides of data/settings.default.json)
 data/settings.json
 
+# Personal backlog / notes (not for the public repo)
+NEXT.md
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

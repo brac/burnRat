@@ -15,6 +15,8 @@ use crate::config::Thresholds;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreatureState {
     Sleeping,
+    Done,
+    Waiting,
     Calm,
     Working,
     Stressed,
@@ -26,6 +28,8 @@ impl CreatureState {
     pub fn as_str(&self) -> &'static str {
         match self {
             CreatureState::Sleeping => "sleeping",
+            CreatureState::Done => "done",
+            CreatureState::Waiting => "waiting",
             CreatureState::Calm => "calm",
             CreatureState::Working => "working",
             CreatureState::Stressed => "stressed",
@@ -70,6 +74,8 @@ impl StateMachine {
     pub fn update(
         &mut self,
         is_active: bool,
+        done: bool,
+        asking: bool,
         recent_activity: bool,
         smoothed_tpm: f64,
         instant_tpm: f64,
@@ -84,6 +90,21 @@ impl StateMachine {
             self.last_onfire = None;
             self.spent_until = None;
             return (CreatureState::Sleeping, event);
+        }
+
+        // Awaiting the user takes precedence over the rate-driven states (and
+        // the post-onfire crash). Asking a question (interactive tool) →
+        // Waiting; a finished turn → Done.
+        if asking || done {
+            self.level = CALM;
+            self.onfire_since = None;
+            self.spent_until = None;
+            let state = if asking {
+                CreatureState::Waiting
+            } else {
+                CreatureState::Done
+            };
+            return (state, event);
         }
 
         self.advance_level(smoothed_tpm);
@@ -209,36 +230,36 @@ mod tests {
     #[test]
     fn sleeps_when_inactive() {
         let mut m = StateMachine::new(thresholds());
-        assert_eq!(m.update(false, false, 99_999.0, 0.0, t0()).0, CreatureState::Sleeping);
+        assert_eq!(m.update(false, false, false, false, 99_999.0, 0.0, t0()).0, CreatureState::Sleeping);
     }
 
     #[test]
     fn rises_through_tiers() {
         let mut m = StateMachine::new(thresholds());
         let t = t0();
-        assert_eq!(m.update(true, false,500.0, 0.0, t).0, CreatureState::Calm);
-        assert_eq!(m.update(true, false,3_000.0, 0.0, t).0, CreatureState::Working);
-        assert_eq!(m.update(true, false,10_000.0, 0.0, t).0, CreatureState::Stressed);
+        assert_eq!(m.update(true, false, false, false,500.0, 0.0, t).0, CreatureState::Calm);
+        assert_eq!(m.update(true, false, false, false,3_000.0, 0.0, t).0, CreatureState::Working);
+        assert_eq!(m.update(true, false, false, false,10_000.0, 0.0, t).0, CreatureState::Stressed);
     }
 
     #[test]
     fn hysteresis_holds_state() {
         let mut m = StateMachine::new(thresholds());
         let t = t0();
-        m.update(true, false,10_000.0, 0.0, t); // -> stressed
+        m.update(true, false, false, false,10_000.0, 0.0, t); // -> stressed
         // Between stressed.down (5500) and stressed.up (8000): stays stressed.
-        assert_eq!(m.update(true, false,6_500.0, 0.0, t).0, CreatureState::Stressed);
+        assert_eq!(m.update(true, false, false, false,6_500.0, 0.0, t).0, CreatureState::Stressed);
         // Below stressed.down: drop to working.
-        assert_eq!(m.update(true, false,4_000.0, 0.0, t).0, CreatureState::Working);
+        assert_eq!(m.update(true, false, false, false,4_000.0, 0.0, t).0, CreatureState::Working);
     }
 
     #[test]
     fn onfire_requires_sustain() {
         let mut m = StateMachine::new(thresholds());
         let t = t0();
-        assert_eq!(m.update(true, false,30_000.0, 0.0, t).0, CreatureState::Stressed);
+        assert_eq!(m.update(true, false, false, false,30_000.0, 0.0, t).0, CreatureState::Stressed);
         let later = t + Duration::seconds(15);
-        assert_eq!(m.update(true, false,30_000.0, 0.0, later).0, CreatureState::OnFire);
+        assert_eq!(m.update(true, false, false, false,30_000.0, 0.0, later).0, CreatureState::OnFire);
     }
 
     #[test]
@@ -246,20 +267,20 @@ mod tests {
         let mut m = StateMachine::new(thresholds());
         let t = t0();
         // Burn onfire (sustained)...
-        m.update(true, false,30_000.0, 0.0, t);
+        m.update(true, false, false, false,30_000.0, 0.0, t);
         let hot = t + Duration::seconds(15);
-        assert_eq!(m.update(true, false,30_000.0, 0.0, hot).0, CreatureState::OnFire);
+        assert_eq!(m.update(true, false, false, false,30_000.0, 0.0, hot).0, CreatureState::OnFire);
         // ...then the rate collapses → spent crash.
         let crash = hot + Duration::seconds(10);
-        assert_eq!(m.update(true, false,100.0, 0.0, crash).0, CreatureState::Spent);
+        assert_eq!(m.update(true, false, false, false,100.0, 0.0, crash).0, CreatureState::Spent);
         // Still spent during the crash window.
         assert_eq!(
-            m.update(true, false,100.0, 0.0, crash + Duration::seconds(5)).0,
+            m.update(true, false, false, false,100.0, 0.0, crash + Duration::seconds(5)).0,
             CreatureState::Spent
         );
         // After the crash window, relaxes to calm.
         assert_eq!(
-            m.update(true, false,100.0, 0.0, crash + Duration::seconds(25)).0,
+            m.update(true, false, false, false,100.0, 0.0, crash + Duration::seconds(25)).0,
             CreatureState::Calm
         );
     }
@@ -269,13 +290,13 @@ mod tests {
         let mut m = StateMachine::new(thresholds());
         let t = t0();
         // Low rate with no onfire history → calm, never spent.
-        assert_eq!(m.update(true, false,100.0, 0.0, t).0, CreatureState::Calm);
+        assert_eq!(m.update(true, false, false, false,100.0, 0.0, t).0, CreatureState::Calm);
     }
 
     #[test]
     fn spike_emits_flinch() {
         let mut m = StateMachine::new(thresholds());
-        let (_, e) = m.update(true, false, 0.0, 90_000.0, t0());
+        let (_, e) = m.update(true, false, false, false, 0.0, 90_000.0, t0());
         assert_eq!(e, Some("flinch"));
     }
 
@@ -284,6 +305,26 @@ mod tests {
         let mut m = StateMachine::new(thresholds());
         // A fresh token write (recent_activity) perks up to working immediately,
         // even though the smoothed rate is still ~0.
-        assert_eq!(m.update(true, true, 0.0, 0.0, t0()).0, CreatureState::Working);
+        assert_eq!(m.update(true, false, false, true, 0.0, 0.0, t0()).0, CreatureState::Working);
+    }
+
+    #[test]
+    fn done_overrides_rate() {
+        let mut m = StateMachine::new(thresholds());
+        // A finished turn (done) wins over a high rate / recent activity.
+        assert_eq!(
+            m.update(true, true, false, true, 30_000.0, 0.0, t0()).0,
+            CreatureState::Done
+        );
+    }
+
+    #[test]
+    fn asking_overrides_rate() {
+        let mut m = StateMachine::new(thresholds());
+        // An interactive question (asking) wins over the rate → Waiting.
+        assert_eq!(
+            m.update(true, false, true, true, 30_000.0, 0.0, t0()).0,
+            CreatureState::Waiting
+        );
     }
 }

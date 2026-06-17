@@ -27,15 +27,15 @@ Rust poll loop (1s)                          Frontend (event listener)
 | `src-tauri/src/config.rs` | Loads `data/*.json` (embedded defaults + live dev override) |
 | `src-tauri/src/userconfig.rs` | Persists user overrides (opacity) to the OS app-config dir |
 | `src/main.ts` | Listens for `game-state`; sprite/animation; working frame loop; surprised pop |
-| `src/styles.css` | Per-state styling; sprites are static images (working animates via JS frame swaps) |
+| `src/styles.css` | Per-state styling; sprites are images animated via JS frame swaps |
 | `data/` | All tunable magic numbers — **no logic depends on hardcoded numbers elsewhere** |
-| `public/sprites/` | Per-state PNGs (`sleeping, idle, working, working_1, working_2, stressed, onfire, spent, surprised`) |
+| `src/sprites/` | Per-state PNGs, auto-discovered by filename: `<state>.png` + optional `<state>_1.png`, `<state>_2.png`, … grouped into that state's loop via `import.meta.glob` in `main.ts` |
 
 ## Conventions
 
 - **Tunables go in `data/`**, never hardcoded in logic. `config.rs` embeds the defaults via `include_str!` *and* re-reads the live files from the repo `data/` dir in dev (resolved via `CARGO_MANIFEST_DIR`), so thresholds can be tuned without a rebuild.
 - **The burn signal is `input + output` tokens only** — cache read/creation tokens are excluded (they're ~100× larger and would peg the rat permanently hot).
-- The state→sprite mapping (`SPRITE` table in `main.ts`) is the single swap point for art.
+- Art is auto-discovered from `src/sprites/` by filename convention (`main.ts`); add frames by dropping files in, no code changes. `STATE_BASE` in `main.ts` maps a state to a differently-named base (e.g. `calm` → `idle`).
 - Frontend has no business logic. If you're tempted to add a threshold or rule in TS, it belongs in Rust + `data/`.
 
 ## Build / test / run

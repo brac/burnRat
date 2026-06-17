@@ -14,12 +14,18 @@ Claude Code writes one JSONL file per session to `~/.claude/projects/<project>/<
 |---|---|
 | `sleeping` | No new tokens for a while (idle nap) |
 | `calm` | Active window, low/no burn |
-| `working` | Moderate burn (animated 3-frame loop) |
+| `working` | Moderate burn (animated loop) |
 | `stressed` | High burn |
 | `onfire` | Sustained very high burn |
 | `spent` | The crash *after* burning onfire — rate collapses and the rat slumps |
+| `waiting` | Claude is asking you something (`AskUserQuestion` / plan approval) |
+| `done` | Claude finished a turn — task complete, awaiting your next instruction |
 
 A brief **surprised** pop plays when the rat perks up from rest into work. Thresholds use hysteresis so it doesn't strobe on a noisy signal.
+
+### Sprites
+
+Frames live in [`src/sprites/`](src/sprites/) and are auto-discovered by filename: drop in `<state>.png` plus optional `<state>_1.png`, `<state>_2.png`, … and they're grouped into that state's loop automatically (1 frame = static, 2 = alternate, 3+ = smooth ping-pong). No code changes needed — new files are picked up on the next dev reload / build.
 
 ---
 

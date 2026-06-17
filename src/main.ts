@@ -17,30 +17,48 @@ interface GameState {
   event: string | null;
 }
 
-// State -> sprite file. Served from /public/sprites. `calm` uses the idle art.
-const SPRITE: Record<string, string> = {
-  sleeping: "/sprites/sleeping.png",
-  calm: "/sprites/idle.png",
-  working: "/sprites/working.png",
-  stressed: "/sprites/stressed.png",
-  onfire: "/sprites/onfire.png",
-  spent: "/sprites/spent.png",
-  surprised: "/sprites/surprised.png",
-};
-
-// Working is a 3-frame loop.
-const WORKING_FRAMES = [
-  "/sprites/working.png",
-  "/sprites/working_1.png",
-  "/sprites/working_2.png",
-];
-
 const FRAME_MS = 280; // animation cadence; also the "1 frame" surprised duration
 
-// Preload so transitions don't flash a blank frame.
-for (const src of [...Object.values(SPRITE), ...WORKING_FRAMES]) {
+// Auto-discover sprite frames from src/sprites/. Drop in `<state>.png` plus
+// optional `<state>_1.png`, `<state>_2.png`, … and they're grouped into that
+// state's animation loop automatically: 1 frame = static, 2 = alternate,
+// 3+ = smooth ping-pong. Adding a file is picked up on the next dev reload /
+// build — no code changes needed.
+const modules = import.meta.glob("./sprites/*.png", {
+  eager: true,
+  query: "?url",
+  import: "default",
+}) as Record<string, string>;
+
+// Group file URLs by state base name, ordered by frame index.
+// "onfire.png" -> base "onfire" idx 0; "onfire_1.png" -> base "onfire" idx 1.
+const FRAMES: Record<string, string[]> = {};
+{
+  const tmp: Record<string, Array<{ idx: number; url: string }>> = {};
+  for (const [path, url] of Object.entries(modules)) {
+    const name = path.split("/").pop()!.replace(/\.png$/i, "");
+    const m = name.match(/^(.+?)_(\d+)$/);
+    const base = m ? m[1] : name;
+    const idx = m ? parseInt(m[2], 10) : 0;
+    (tmp[base] ??= []).push({ idx, url });
+  }
+  for (const [base, arr] of Object.entries(tmp)) {
+    FRAMES[base] = arr.sort((a, b) => a.idx - b.idx).map((x) => x.url);
+  }
+}
+
+// Map a creature state to its frame base name (states whose art uses a
+// different filename go here). Everything else uses the state name directly.
+const STATE_BASE: Record<string, string> = { calm: "idle" };
+
+function framesFor(state: string): string[] {
+  return FRAMES[STATE_BASE[state] ?? state] ?? FRAMES["idle"] ?? [];
+}
+
+// Preload all frames so transitions don't flash a blank.
+for (const url of Object.values(FRAMES).flat()) {
   const img = new Image();
-  img.src = src;
+  img.src = url;
 }
 
 const fmt = (n: number) =>
@@ -54,27 +72,28 @@ window.addEventListener("DOMContentLoaded", () => {
   let liveState = "sleeping";
   let prevState = "sleeping";
   let surprisedUntil = 0; // show the surprised sprite until this timestamp
-  let frame = 0;
+  let step = 0;
 
-  // Sprite render loop — independent of the ~2s data poll.
+  // Sprite render loop — independent of the data poll. Ping-pongs through
+  // however many frames the current state has (0→1→2→1→0…); 1 frame is static,
+  // 2 frames alternate, 3+ make a smooth back-and-forth.
   setInterval(() => {
     if (!sprite) return;
-    const now = Date.now();
-    if (now < surprisedUntil) {
-      sprite.src = SPRITE.surprised;
-    } else if (liveState === "working") {
-      frame = (frame + 1) % WORKING_FRAMES.length;
-      sprite.src = WORKING_FRAMES[frame];
-    } else {
-      sprite.src = SPRITE[liveState] ?? SPRITE.calm;
-    }
+    const frames =
+      Date.now() < surprisedUntil ? framesFor("surprised") : framesFor(liveState);
+    const n = frames.length;
+    if (n === 0) return;
+    const period = n <= 1 ? 1 : 2 * (n - 1);
+    step = (step + 1) % period;
+    const i = n <= 1 ? 0 : step < n ? step : period - step;
+    sprite.src = frames[i];
   }, FRAME_MS);
 
   listen<GameState>("game-state", (event) => {
     const s = event.payload;
 
-    // Surprised "perk-up": resting (sleeping/calm) -> busy. One frame only.
-    const RESTING = new Set(["sleeping", "calm"]);
+    // Surprised "perk-up": resting (sleeping/done/waiting/calm) -> busy.
+    const RESTING = new Set(["sleeping", "done", "waiting", "calm"]);
     const BUSY = new Set(["working", "stressed", "onfire"]);
     if (RESTING.has(prevState) && BUSY.has(s.state)) {
       surprisedUntil = Date.now() + FRAME_MS;

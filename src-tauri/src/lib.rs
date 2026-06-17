@@ -17,7 +17,7 @@ use tauri::{
 };
 
 use crate::config::Config;
-use crate::data::DataMonitor;
+use crate::data::{Awaiting, DataMonitor};
 use crate::rate::RateTracker;
 use crate::state::StateMachine;
 use crate::userconfig::UserConfig;
@@ -156,6 +156,17 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
             // "awake" = there's an active window AND tokens flowed recently. After
             // idle_timeout seconds without new tokens the rat naps (sleeping),
             // rather than waiting the full 5h for the window to lapse.
+            // What Claude is awaiting from the user (a finished turn → done, an
+            // interactive question → asking). Both hold without napping.
+            let kind = if active.is_some() {
+                monitor.awaiting()
+            } else {
+                Awaiting::None
+            };
+            let done = matches!(kind, Awaiting::Done);
+            let asking = matches!(kind, Awaiting::Asking);
+            let awaiting_user = done || asking;
+
             let (consumed, consumed_with_cache, projected, remaining, awake, recent_activity) =
                 match active {
                     Some(b) => {
@@ -165,7 +176,8 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
                             b.total_with_cache(),
                             blocks::projected_work(b, smoothed, now),
                             blocks::time_remaining_min(b, now),
-                            idle_secs <= idle_timeout,
+                            // Awaiting the user never naps; otherwise nap after timeout.
+                            awaiting_user || idle_secs <= idle_timeout,
                             idle_secs <= activity_floor,
                         )
                     }
@@ -174,7 +186,7 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
             let is_active = awake;
 
             let (creature, event) =
-                machine.update(awake, recent_activity, smoothed, instant, now);
+                machine.update(awake, done, asking, recent_activity, smoothed, instant, now);
 
             let game = GameState {
                 smoothed_tpm: smoothed,
