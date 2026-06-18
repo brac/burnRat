@@ -397,13 +397,20 @@ fn active_character(shared: tauri::State<'_, Arc<Shared>>) -> Option<character::
     Some(chosen.resolve())
 }
 
-/// Gather the characters dirs to scan, in override order (dev repo, then bundled
-/// resources, then the user drop-in dir). Missing dirs are scanned harmlessly.
+/// Gather the characters dirs to scan, in ASCENDING priority — a later dir's
+/// character overrides an earlier one with the same id (see `discover`). Order:
+/// bundled resources (the shipped base, and in dev the stale copy `tauri dev`
+/// stages under `target/debug/characters`), then the dev repo `characters/`,
+/// then the user drop-in dir (highest). The dev repo comes *after* resources on
+/// purpose, so live dev edits win over that stale bundled copy; in a shipped
+/// build the dev path doesn't exist, leaving resources as the base with the user
+/// dir on top. Missing dirs are scanned harmlessly.
 fn character_dirs(app: &tauri::AppHandle) -> Vec<std::path::PathBuf> {
-    let mut dirs = vec![character::dev_characters_dir()];
+    let mut dirs = Vec::new();
     if let Ok(res) = app.path().resource_dir() {
         dirs.push(res.join("characters"));
     }
+    dirs.push(character::dev_characters_dir());
     if let Ok(data) = app.path().app_data_dir() {
         dirs.push(data.join("characters"));
     }

@@ -5,12 +5,14 @@
 //! quota-proximity overlay, transient event) to names; the active character
 //! supplies the matching asset. No code path is character-specific.
 //!
-//! Folders are discovered at startup from up to three dirs, scanned in order so
-//! later dirs override earlier ones by `id`:
-//!   1. dev repo `characters/` (via `CARGO_MANIFEST_DIR/../characters`)
-//!   2. bundled defaults — `resource_dir()/characters` (shipped via
-//!      `tauri.conf.json` `bundle.resources`)
-//!   3. user drop-in — `app_data_dir()/characters` (add a folder + restart)
+//! Folders are discovered at startup from up to three dirs, scanned in ASCENDING
+//! priority so a later dir's character overrides an earlier one with the same id:
+//!   1. bundled defaults — `resource_dir()/characters` (shipped via
+//!      `tauri.conf.json` `bundle.resources`; in dev this is the stale copy
+//!      `tauri dev` stages under `target/debug/characters`).
+//!   2. dev repo `characters/` (via `CARGO_MANIFEST_DIR/../characters`) — wins
+//!      over the bundled copy so live edits show in dev; absent in a shipped app.
+//!   3. user drop-in — `app_data_dir()/characters` (add a folder + restart).
 //!
 //! Each character is validated against a fixed contract; an invalid character is
 //! logged and excluded from the valid set — never silently rendered blank.
