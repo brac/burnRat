@@ -408,6 +408,40 @@ mod tests {
         assert_eq!(resolved.assets["sleeping"].urls.len(), 2);
     }
 
+    /// Every character folder shipped in the repo must be contract-valid and
+    /// resolve — covers the rat, the flaming skull, and any future folder
+    /// automatically (so adding a roster member can't silently ship broken).
+    #[test]
+    fn all_shipped_characters_are_valid() {
+        let found = discover(&[dev_characters_dir()]);
+        assert!(
+            found.len() >= 2,
+            "expected at least rat + skull, found {}",
+            found.len()
+        );
+        for c in &found {
+            let resolved = c.resolve();
+            for s in REQUIRED_STATES {
+                assert!(
+                    resolved.assets.contains_key(s),
+                    "character '{}' missing resolved state {s}",
+                    c.manifest.id
+                );
+            }
+            assert!(
+                resolved.assets.contains_key("quotaProximity"),
+                "character '{}' missing quotaProximity overlay",
+                c.manifest.id
+            );
+            assert!(
+                resolved.assets[REQUIRED_STATES[0]].urls[0].starts_with("data:image/png;base64,")
+            );
+        }
+        let ids: Vec<&str> = found.iter().map(|c| c.manifest.id.as_str()).collect();
+        assert!(ids.contains(&"rat"), "rat missing from {ids:?}");
+        assert!(ids.contains(&"skull"), "skull missing from {ids:?}");
+    }
+
     #[test]
     fn discover_dedupes_by_id_later_dir_wins() {
         let a = make_character("dedup-a", "sprite", None);

@@ -36,6 +36,8 @@ body {
   width: 150px;
   height: 150px;
   object-fit: contain;
+  /* Default anchor = centered; reloadCharacter overrides per the manifest. */
+  object-position: 50% 50%;
   image-rendering: auto;
   /* Mirror the art so the rat faces the other way. */
   /*transform: scaleX(-1);*/
@@ -83,6 +85,7 @@ body {
   width: 100%;
   height: 100%;
   object-fit: contain;
+  object-position: 50% 50%;
   pointer-events: none;
 }
 

@@ -8,7 +8,7 @@ This blocks two goals:
 1. **Swappable characters** — a character should be a *folder* of art + a manifest, discovered at runtime, with no code path that is character-specific.
 2. **Cheap character creation** — every character costs the same fixed ~10-asset set, no matter how many situations the engine represents.
 
-The fix is to (a) split state into **three explicit layers** (base / modifier / event) carried explicitly in `GameState`, and (b) make characters **runtime-loaded folders** behind a `character.json` manifest. The engine resolves layers; the active character supplies the matching asset. The rat becomes the reference character; the furnace proves the contract.
+The fix is to (a) split state into **three explicit layers** (base / modifier / event) carried explicitly in `GameState`, and (b) make characters **runtime-loaded folders** behind a `character.json` manifest. The engine resolves layers; the active character supplies the matching asset. The rat becomes the reference character; a second character (a **flaming skull**) proves the contract.
 
 ### Locked decisions (from clarifying questions)
 - **Pose mapping:** the old `Calm` (active, low burn) → **`thinking`**; the old `Waiting` (Claude asking an interactive question) → **`done`**. The fixed base contract is exactly: `sleeping, thinking, working, frantic, onfire, spent, done`.
@@ -163,7 +163,7 @@ struct ResolvedAsset { urls: Vec<String>, anchor: Anchor, canvas: CanvasBox }  /
 - **DOM** (`index.html`): add a stacked overlay image inside `.stack`: `#sprite` (base), `#overlay` (nearlimit), `#hat` (model). Overlay `opacity = near_limit_opacity`, source = `assets["quotaProximity"]`.
 - **Render loop:** ping-pong the base-state frames (existing math at main.ts:149–159, unchanged) over `frames[base_state]`. Generalize the current "surprised pop" latch (main.ts:164–172, `surprisedUntil`) into a one-shot **event player**: on `event != null`, set `activeEvent`/`eventUntil = now + EVENT_MS`; while playing, render `frames[activeEvent]`; then return to base. `EVENT_MS` is a view constant (presentation); the *debounce/cooldown* that decides whether to fire lives in Rust.
 - **Readout (`easeReadout`):** if `quota_percent >= 1.0` → refresh countdown (existing `atlimit` branch, re-keyed); else if `near_limit_opacity > 0` → show `${Math.round(quota_percent*100)}%`; else the eased rate. Easing/glide unchanged.
-- **Positioning:** size the `.stack` box from the manifest `canvas` and align via `anchor` (CSS transform), so swapping a 256×256 rat for a differently-shaped furnace doesn't jump. Keep the 150×150 display footprint.
+- **Positioning:** size the `.stack` box from the manifest `canvas` and align via `anchor` (CSS transform), so swapping a 256×256 rat for a differently-shaped skull doesn't jump. Keep the 150×150 display footprint.
 - **`styles.css`:** remove `.state-approaching10/5/1` and `.state-atlimit` glows (replaced by the opacity overlay). Keep a couple of character-agnostic accents (`onfire` glow, at-limit pulse) as pure presentation. Hats stay global/build-time (not per-character).
 - **Renderer pluggability:** route base/overlay/event drawing through a tiny `renderer` object selected on `resolved.renderer` (only `"sprite"` implemented). A future `"mesh"` renderer is an added branch, not a rewrite — **do not implement mesh now**.
 
@@ -195,13 +195,13 @@ struct ResolvedAsset { urls: Vec<String>, anchor: Anchor, canvas: CanvasBox }  /
 
 **Stage 2 — Character loader + frontend cutover.** Parts B + C + tray. Add `character.rs`, `bundle.resources`, the `active_character` command + `character-changed` event, the tray submenu. Frontend switches from the glob to `invoke("active_character")`, adds the overlay image, plays events one-shot, uses anchor/canvas. Remove `src/sprites/` once the rat renders from its folder. Add loader-validation tests.
 
-**Stage 3 — Prove the contract with the furnace.** Build `characters/furnace/` as a full ~10-asset folder (placeholder art fine) + manifest. Confirm it discovers, validates, tray-swaps live with the rat, and runs with **zero code changes**. Whatever friction it exposes is the real backlog. Do not build more of the roster.
+**Stage 3 — Prove the contract with the flaming skull.** Build `characters/skull/` as a full ~10-asset folder (placeholder art fine) + manifest. Confirm it discovers, validates, tray-swaps live with the rat, and runs with **zero code changes**. Whatever friction it exposes is the real backlog. Do not build more of the roster. (Detailed plan: see "Stage 3 — detailed plan" below.)
 
 ---
 
 ## Risks & mitigations
 - **Runtime asset loading in prod vs dev** (biggest risk). Mitigated by data URLs (no asset-protocol/CSP/scope config) + the dev/resource/user dir scan order mirroring the proven `config.rs` pattern. Verify the bundled `resource_dir()/characters` path resolves inside the macOS `.app`.
-- **Character swap without window jump.** Manifest `canvas`/`anchor` + a fixed 150×150 display box; test rat↔furnace live.
+- **Character swap without window jump.** Manifest `canvas`/`anchor` + a fixed 150×150 display box; test rat↔skull live.
 - **Frontend creeping business logic.** Opacity ramp and rate unit computed in Rust; the view only eases, ping-pongs, and plays one-shots.
 - **Per-character cost creep.** Required set stays 10; extra frames are optional manifest polish, never required.
 - **Held→transient behavior change** for `refreshed`/`error` is intentional (spec) — call it out in the Stage 1 PR since the felt behavior changes (brief celebration/startle instead of a held pose).
@@ -209,8 +209,45 @@ struct ResolvedAsset { urls: Vec<String>, anchor: Anchor, canvas: CanvasBox }  /
 ## Verification
 - `cd src-tauri && cargo test` — state machine (renamed poses, sent→thinking, spent crash), event resolver (priority + debounce), rate unit, message classification, **character loader validation** (missing asset / missing state / bad renderer → excluded + logged).
 - `cargo clippy -- -D warnings` and `cargo fmt`.
-- `npm run tauri dev` and observe on the live rat: poses track the rate (`thinking→working→frantic→onfire→spent`); near-limit overlay fades in past ~90% with a `%` readout, then a refresh countdown at ≥100%; `refreshed`/`error` play as brief one-shots and return to base; the tray **Character** submenu swaps rat↔furnace instantly with no window jump.
-- Loud-failure check: temporarily delete one furnace asset → confirm furnace is excluded + logged, rat keeps working.
+- `npm run tauri dev` and observe on the live rat: poses track the rate (`thinking→working→frantic→onfire→spent`); near-limit overlay fades in past ~90% with a `%` readout, then a refresh countdown at ≥100%; `refreshed`/`error` play as brief one-shots and return to base; the tray **Character** submenu swaps rat↔skull instantly with no window jump.
+- Loud-failure check: temporarily delete one skull asset → confirm the skull is excluded + logged, rat keeps working.
 - Quota sanity vs `npx ccusage@latest blocks --json` (active-window `input+output`/`totalTokens`), per `CLAUDE.md`.
 - Note: this is a Tauri desktop window, not a browser app — verify by observation/manual screenshots, not Playwright.
-</content>
+
+---
+
+## Stage 3 — detailed plan (flaming skull)
+
+**Goal.** Prove the character system works end-to-end with a *second, independently-authored* character and **zero engine code changes** — and resolve the one piece of friction Stage 2 deliberately deferred (manifest-driven **anchor/canvas** placement). A flaming skull reads better than a furnace and exercises a non-rat silhouette. This is a contract test, not an art deliverable — placeholder art is fine and the real skull art drops in over it with no code changes.
+
+### Deliverables
+1. **`characters/skull/character.json`** — same fixed contract as the rat: the 7 base states (`sleeping/thinking/working/frantic/onfire/spent/done`), the `quotaProximity` modifier (`nearlimit.png`), and the `refreshed`/`error`/`flinch` events. Asset filenames are semantic (`sleeping.png`, …, `nearlimit.png`, `refreshed.png`, `error.png`, `flinch.png`) so the user authoring fresh art names files by what they *are*. `canvas`/`anchor` are declared and **actually honored** by the view (see code change below).
+2. **`characters/skull/` placeholder PNGs** — every required file present so the character validates and appears in the tray *now*, letting the rat↔skull swap be verified this stage. Placeholders are copied from the rat **only where the real asset is absent**, so they never clobber art the user has already dropped in. Documented as placeholders in the skull's `ART_NEEDS.md`.
+3. **`characters/skull/ART_NEEDS.md`** — the exact asset contract (filenames, layer, the overlay caveat for `nearlimit`) + the 300×300 / <100 KB sizing guidance, mirroring the rat's.
+
+### Code change — honor `anchor` (the deferred friction)
+Stage 2 rendered every character into a fixed 150×150 box with `object-fit: contain` (always centers), ignoring the manifest `anchor`. That's correct *only* for a centered, square character. To make the system robust to whatever silhouette/framing the skull uses (and any future character), the view now applies the manifest **`anchor`** as `object-position` on the base sprite and the overlay:
+
+- `reloadCharacter()` reads `resolved.anchor` and sets `--anchor-x`/`--anchor-y` (or `object-position: ${x*100}% ${y*100}%`) on `#sprite` and `#overlay`. Anchor `0.5/0.5` ⇒ `50% 50%` ⇒ centered ⇒ **identical to today** (the rat is unaffected — backward compatible).
+- The **window-jump** guarantee is already met by the fixed 150×150 footprint (the window never resizes on swap); `object-fit: contain` keeps any aspect ratio undistorted. `canvas` therefore needs no CSS sizing for the sprite path — it stays in the manifest/`ResolvedAsset` for a future renderer and is left as a documented no-op for now (call this out rather than pretend it's wired). The hat stays centered/global (no per-character hats; no hat art exists yet).
+
+This is the minimal honest interpretation of "size from `canvas`, align via `anchor`": anchor is wired and meaningful; canvas is acknowledged as a no-op under `object-fit: contain` instead of being faked.
+
+### Tests
+- Generalize the shipped-character check: assert **every** discovered character under `dev_characters_dir()` is contract-valid and resolves (so the rat *and* the skull are both guaranteed valid, and any future folder is auto-covered).
+- Keep the existing rat-specific assertion (2 sleeping frames) as a regression guard.
+
+### Build order
+1. Manifest + `ART_NEEDS.md` + placeholder PNGs (copy-if-absent) → skull validates, appears in tray.
+2. Wire `anchor` → `object-position` in `main.ts` (+ a CSS default of `50% 50%`).
+3. `cargo test` (incl. the generalized all-characters-valid test), `cargo clippy -- -D warnings`, `cargo fmt`, `npm run build`.
+4. Commit `Stage 3: prove the contract with the flaming skull`.
+
+### Live verification (needs eyes on the window — user-run)
+- Tray **Character** now lists **Rat** and **Flaming Skull**; selecting one swaps live with no window jump and the readout/poses keep tracking the rate.
+- Loud-failure check: rename one `characters/skull/*.png` away → the skull drops out of the tray + an `eprintln!` logs why; the rat keeps working. Restore it and it reappears on restart.
+- As the user replaces each placeholder with real skull art, it shows up on the next `character-changed`/restart with **zero code changes** — the whole point.
+
+### Explicitly out of scope (do not build)
+- More of the roster beyond the skull.
+- Per-character hats, the `mesh` renderer, or `canvas`-driven CSS sizing (only add the last if a real character actually needs a non-contain fit — none does yet).

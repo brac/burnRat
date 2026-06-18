@@ -1,0 +1,29 @@
+{
+  "id": "skull",
+  "name": "Flaming Skull",
+  "renderer": "sprite",
+  "canvas": { "width": 300, "height": 300 },
+  "anchor": { "x": 0.5, "y": 0.5 },
+
+  "$frames": "When present, `frames` is the full ordered ping-pong loop (the renderer cycles 0->n-1->0); `asset` is the single static/representative image used when `frames` is absent. Adding frames is optional polish and never inflates the required set. Filenames are semantic — name a file by what the pose IS, then the contract just works.",
+
+  "states": {
+    "sleeping": { "asset": "sleeping.png" },
+    "thinking": { "asset": "thinking.png" },
+    "working":  { "asset": "working.png" },
+    "frantic":  { "asset": "frantic.png" },
+    "onfire":   { "asset": "onfire.png" },
+    "spent":    { "asset": "spent.png" },
+    "done":     { "asset": "done.png" }
+  },
+
+  "modifiers": {
+    "quotaProximity": { "asset": "nearlimit.png" }
+  },
+
+  "events": {
+    "refreshed": { "asset": "refreshed.png" },
+    "error":     { "asset": "error.png" },
+    "flinch":    { "asset": "flinch.png" }
+  }
+}

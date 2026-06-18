@@ -131,6 +131,17 @@ window.addEventListener("DOMContentLoaded", () => {
       }
       frames = next;
       overlayUrls = c.assets["quotaProximity"]?.urls ?? [];
+
+      // Honor the manifest anchor: place the contained art so the anchor point
+      // maps to that fraction of the fixed footprint, keeping a differently-
+      // shaped character (e.g. the skull vs the rat) from jumping on a swap.
+      // 0.5/0.5 = "50% 50%" = centered = identical to the default, so the rat is
+      // unaffected. (`canvas` stays a no-op under object-fit: contain, which
+      // already keeps any aspect ratio undistorted.)
+      const objPos = `${c.anchor.x * 100}% ${c.anchor.y * 100}%`;
+      if (sprite) sprite.style.objectPosition = objPos;
+      if (overlay) overlay.style.objectPosition = objPos;
+
       // Point the overlay image at the quota-proximity art (opacity is driven
       // per-tick by the game-state listener); hide it if the character has none.
       if (overlay) {
