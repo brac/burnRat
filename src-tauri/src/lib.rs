@@ -527,7 +527,9 @@ fn build_tray(app: &tauri::App, shared: Arc<Shared>) -> tauri::Result<()> {
     let menu = Menu::with_items(app, &[&toggle, &opacity_menu, &character_menu, &quit])?;
 
     TrayIconBuilder::new()
-        .icon(app.default_window_icon().unwrap().clone())
+        // A rat silhouette (rendered white so it reads on the dark taskbar).
+        // Swap icons/tray-rat.png for any rat image — no code change.
+        .icon(tauri::include_image!("icons/tray-rat.png"))
         .tooltip("burnRat")
         .menu(&menu)
         .show_menu_on_left_click(true)
