@@ -6,7 +6,7 @@
 //! cutoff. `OnFire` additionally requires the rate to stay high for a sustained
 //! period. `Spent` is the crash *after* burning hot: when the rate collapses
 //! shortly after being onfire, the rat slumps as spent for a while, then
-//! relaxes back to thinking.
+//! relaxes back to idle.
 //!
 //! Quota proximity (Layer 2) and transient events (Layer 3) are computed
 //! elsewhere (the poll loop and `events.rs`) and composed by the view — this
@@ -21,10 +21,10 @@ use crate::config::Thresholds;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BaseState {
     Sleeping,
-    /// Awake but waiting — we sent a message and are awaiting Claude's reply, no
-    /// work flowing yet. Distinct from `Thinking` (Claude is actively generating
-    /// at a low rate). An optional pose: characters without `idle.png` fall back
-    /// to `thinking` in the view.
+    /// Awake but quiet — nothing burning and not awaiting anything specific (a
+    /// post-turn lull, you composing a message, waiting on Claude's reply). The
+    /// default "hanging out" pose; it naps after the idle timeout unless held.
+    /// An optional pose: characters without `idle.png` fall back to `thinking`.
     Idle,
     Thinking,
     Working,
@@ -32,6 +32,10 @@ pub enum BaseState {
     OnFire,
     Spent,
     Done,
+    /// The agent is asking YOU something — an interactive question (AskUserQuestion
+    /// / ExitPlanMode) or a pending tool-permission request. Distinct from `Done`
+    /// (a finished turn). Optional pose: falls back to `done` without `asking.png`.
+    Asking,
 }
 
 impl BaseState {
@@ -45,6 +49,7 @@ impl BaseState {
             BaseState::OnFire => "onfire",
             BaseState::Spent => "spent",
             BaseState::Done => "done",
+            BaseState::Asking => "asking",
         }
     }
 }
@@ -147,25 +152,31 @@ impl StateMachine {
         }
 
         // Awaiting the user takes precedence over the rate-driven states (and
-        // the post-onfire crash). A finished turn *and* an interactive question
-        // both read as `Done` (the rat is waiting on you).
-        if asking || done {
+        // the post-onfire crash). An interactive question / pending permission
+        // (`asking`) reads as `Asking`; a finished turn (`done`) as `Done` —
+        // both mean "the rat is waiting on you", but they're distinct poses.
+        if asking {
+            self.level = CALM;
+            self.onfire_since = None;
+            self.spent_until = None;
+            return BaseState::Asking;
+        }
+        if done {
             self.level = CALM;
             self.onfire_since = None;
             self.spent_until = None;
             return BaseState::Done;
         }
 
-        // A fresh user message (awaiting Claude, no tokens flowing yet) → the
-        // `idle` waiting pose: the rat hangs out through the dead air before
-        // Claude responds (and never naps mid-wait — see the poll loop). This is
-        // distinct from `thinking`, which is Claude actively generating at a low
-        // rate. Characters without idle art fall back to thinking in the view.
+        // A fresh user message: Claude is about to respond → the `thinking`
+        // pose ("Claude is thinking about your message"). It never naps mid-wait
+        // (see the poll loop). This is distinct from `idle` (the quiet pose when
+        // nothing is happening at all — a lull, or you composing a message).
         if sent {
             self.level = CALM;
             self.onfire_since = None;
             self.spent_until = None;
-            return BaseState::Idle;
+            return BaseState::Thinking;
         }
 
         self.advance_level(smoothed_tpm);
@@ -179,7 +190,9 @@ impl StateMachine {
         }
 
         let base = match self.level {
-            CALM => BaseState::Thinking,
+            // Awake but not burning and not awaiting anything → the quiet `idle`
+            // pose (was `thinking`); it naps after the idle timeout.
+            CALM => BaseState::Idle,
             WORKING => BaseState::Working,
             STRESSED => BaseState::Frantic,
             _ => self.resolve_onfire(now),
@@ -191,7 +204,7 @@ impl StateMachine {
         self.apply_spent(base, smoothed_tpm, now)
     }
 
-    /// The post-onfire crash: collapse to spent, hold, then relax to thinking.
+    /// The post-onfire crash: collapse to spent, hold, then relax to idle.
     fn apply_spent(&mut self, base: BaseState, smoothed_tpm: f64, now: DateTime<Utc>) -> BaseState {
         let cfg = &self.thresholds.spent;
 
@@ -202,12 +215,13 @@ impl StateMachine {
             } else if now < until {
                 return BaseState::Spent;
             } else {
-                self.spent_until = None; // crash over — relax to thinking
+                self.spent_until = None; // crash over — relax to idle
             }
         }
 
-        // Enter the crash: rate collapsed soon after burning onfire.
-        let collapsed = base == BaseState::Thinking && smoothed_tpm < cfg.rate_threshold;
+        // Enter the crash: rate collapsed soon after burning onfire. The collapsed
+        // pose is the quiet CALM tier, which now resolves to `Idle`.
+        let collapsed = base == BaseState::Idle && smoothed_tpm < cfg.rate_threshold;
         let recently_onfire = self
             .last_onfire
             .map(|t| now - t <= Duration::seconds(cfg.after_onfire_seconds))
@@ -328,7 +342,7 @@ mod tests {
     fn rises_through_tiers() {
         let mut m = StateMachine::new(thresholds());
         let t = t0();
-        assert_eq!(step(&mut m, 500.0, t), BaseState::Thinking);
+        assert_eq!(step(&mut m, 500.0, t), BaseState::Idle);
         assert_eq!(step(&mut m, 3_000.0, t), BaseState::Working);
         assert_eq!(step(&mut m, 10_000.0, t), BaseState::Frantic);
     }
@@ -369,10 +383,10 @@ mod tests {
             step(&mut m, 100.0, crash + Duration::seconds(5)),
             BaseState::Spent
         );
-        // After the crash window, relaxes to thinking.
+        // After the crash window, relaxes to idle.
         assert_eq!(
             step(&mut m, 100.0, crash + Duration::seconds(25)),
-            BaseState::Thinking
+            BaseState::Idle
         );
     }
 
@@ -380,8 +394,8 @@ mod tests {
     fn no_spent_without_prior_onfire() {
         let mut m = StateMachine::new(thresholds());
         let t = t0();
-        // Low rate with no onfire history → thinking, never spent.
-        assert_eq!(step(&mut m, 100.0, t), BaseState::Thinking);
+        // Low rate with no onfire history → idle, never spent.
+        assert_eq!(step(&mut m, 100.0, t), BaseState::Idle);
     }
 
     #[test]
@@ -445,25 +459,33 @@ mod tests {
     }
 
     #[test]
-    fn asking_maps_to_done() {
+    fn asking_maps_to_asking() {
         let mut m = StateMachine::new(thresholds());
-        // An interactive question now also reads as Done (waiting on the user).
+        // An interactive question / pending permission reads as its own `Asking`
+        // pose (distinct from a finished turn's `Done`), over a high rate.
         assert_eq!(
             m.update(true, false, true, false, true, 30_000.0, 0.0, t0())
                 .0,
-            BaseState::Done
+            BaseState::Asking
         );
     }
 
     #[test]
-    fn sent_maps_to_idle() {
+    fn sent_maps_to_thinking() {
         let mut m = StateMachine::new(thresholds());
-        // A just-sent user message → idle (awaiting Claude), even over a stale
-        // high rate. Distinct from thinking (Claude actively generating).
+        // A just-sent user message → thinking ("Claude is thinking"), even over a
+        // stale high rate. Distinct from idle (the quiet, nothing-happening pose).
         assert_eq!(
             m.update(true, false, false, true, false, 30_000.0, 0.0, t0())
                 .0,
-            BaseState::Idle
+            BaseState::Thinking
         );
+    }
+
+    #[test]
+    fn calm_maps_to_idle() {
+        let mut m = StateMachine::new(thresholds());
+        // Awake, low rate, nothing awaited → the quiet `idle` pose (then naps).
+        assert_eq!(step(&mut m, 200.0, t0()), BaseState::Idle);
     }
 }

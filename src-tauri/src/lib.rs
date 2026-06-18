@@ -166,9 +166,31 @@ fn toggle_click_through(app: &tauri::AppHandle, shared: &Shared) {
     apply_click_through(app, next);
 }
 
+/// Place the bubble as a speech bubble anchored to the pet: horizontally
+/// centered on the pet, just above it (or below, if the pet is near the top of
+/// the screen). All in physical pixels, matching `set_position`.
+fn position_bubble_over_pet(app: &tauri::AppHandle, bubble: &tauri::WebviewWindow) {
+    let Some(pet) = app.get_webview_window("main") else {
+        return;
+    };
+    let (Ok(pp), Ok(ps), Ok(bs)) = (pet.outer_position(), pet.outer_size(), bubble.outer_size())
+    else {
+        return;
+    };
+    let gap = 6;
+    let x = pp.x + (ps.width as i32 - bs.width as i32) / 2;
+    let above = pp.y - bs.height as i32 - gap;
+    let y = if above >= 0 {
+        above
+    } else {
+        pp.y + ps.height as i32 + gap // no room above → tuck it below the pet
+    };
+    let _ = bubble.set_position(tauri::PhysicalPosition::new(x, y));
+}
+
 /// Build the bubble Notifier: emit the event to the frontend and show/hide the
-/// dedicated permission window. Runs on the bridge's connection thread, so it
-/// only uses thread-safe `AppHandle` calls.
+/// dedicated permission window (anchored to the pet). Runs on the bridge's
+/// connection thread, so it only uses thread-safe `AppHandle` calls.
 fn permission_notifier(app: &tauri::AppHandle) -> hookbridge::Notifier {
     let app = app.clone();
     Arc::new(move |name: &str, payload: serde_json::Value| {
@@ -176,6 +198,7 @@ fn permission_notifier(app: &tauri::AppHandle) -> hookbridge::Notifier {
         match name {
             "permission-request" => {
                 if let Some(w) = app.get_webview_window("permission") {
+                    position_bubble_over_pet(&app, &w);
                     let _ = w.show();
                     let _ = w.set_focus();
                 }
@@ -352,7 +375,13 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
             } else {
                 Awaiting::None
             };
-            let asking = matches!(kind, Awaiting::Asking);
+            // A pending tool-permission request (the bubble is up) is the agent
+            // asking you something — drive the pet into its attention pose via
+            // the existing `asking` path and keep it awake, just like an
+            // interactive question. Clears the instant you decide (or it times
+            // out), reverting to the live rate-driven pose.
+            let permission_pending = shared.permissions.latest().is_some();
+            let asking = matches!(kind, Awaiting::Asking) || permission_pending;
             let done = matches!(kind, Awaiting::Done) && nap_idle <= done_hold;
             // An API error is now a transient one-shot event (Layer 3) — it no
             // longer holds the rat awake; it's fed to the event resolver below.
@@ -412,7 +441,8 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
             // band so it always glides down (frantic -> working -> thinking ->
             // sleep, or the post-onfire spent crash) instead of cutting to a nap.
             let burning = smoothed >= working_floor;
-            let awake = base_awake || burning;
+            // A pending permission keeps the pet awake even with no active block.
+            let awake = base_awake || burning || permission_pending;
             let is_active = awake;
 
             // Keep adapting the ceiling if a block completes while we're running.

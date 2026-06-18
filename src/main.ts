@@ -74,17 +74,22 @@ interface ResolvedCharacter {
   assets: Record<string, ResolvedAsset>;
 }
 
-// Look up a pose's frames, falling back to the always-present `thinking` pose
-// so an unmapped name never renders blank.
+// Optional poses fall back to a required one when a character lacks the art:
+// `asking` → `done`, `idle` → `thinking`. Keeps new states working before art
+// exists (and for characters that never add it).
+const POSE_FALLBACK: Record<string, string> = { asking: "done", idle: "thinking" };
+
+// Look up a pose's frames, falling back to its designated pose (then the
+// always-present `thinking`) so an unmapped name never renders blank.
 function framesFor(state: string): string[] {
-  return frames[state] ?? frames["thinking"] ?? [];
+  return frames[state] ?? frames[POSE_FALLBACK[state]] ?? frames["thinking"] ?? [];
 }
 
 // Dev-only: every pose the in-window picker can force — the base states (incl.
 // optional `idle`) plus the transient events. Keep in sync with
 // BaseState::as_str() in src-tauri/src/state.rs. Only used when DEV is true.
 const DEV_STATES = [
-  "sleeping", "idle", "thinking", "working", "frantic", "onfire", "spent", "done",
+  "sleeping", "idle", "thinking", "working", "frantic", "onfire", "spent", "done", "asking",
   "refreshed", "error", "flinch",
 ];
 // Vite sets this true under `tauri dev`, false in a production build, so the

@@ -44,7 +44,6 @@
         "maximizable": false,
         "minimizable": false,
         "visible": false,
-        "center": true,
         "focus": true
       }
     ],
