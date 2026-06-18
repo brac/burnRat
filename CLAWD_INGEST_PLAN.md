@@ -161,7 +161,34 @@ behaves identically (falls back to JSONL) when hooks are disabled. Unit-test the
 
 ---
 
-## #2 — permission interaction (the control-surface jump)
+## #2 — permission interaction ✅ BUILT (live verify owed)
+
+**Status (built this session):** the full Allow/Deny permission bubble.
+- `permission.rs`: `PermissionRegistry` (register→id+Receiver, resolve, latest,
+  forget) + `Decision` (Allow/Deny/Defer). Plain Rust, unit-tested.
+- Bridge `POST /permission`: parks the request, drives the bubble via a `Notifier`
+  closure, blocks the connection thread on the channel up to
+  `permissionTimeoutSeconds` (default 300), then replies with the decision.
+- `burnrat permission` subcommand: a blocking command hook — reads the request on
+  stdin, forwards to `/permission`, prints the `hookSpecificOutput` decision JSON
+  on stdout (Allow/Deny) or nothing (Defer → Claude's own prompt). Exits 0 if the
+  app's down (graceful fallback).
+- `hookinstall`: installs a `PermissionRequest` command hook; `command_is_ours`
+  widened to match it so uninstall stays clean.
+- lib: `resolve_permission` Tauri command; global `Ctrl+Shift+Y/N` resolve the
+  latest pending; notifier emits + shows/hides the bubble window.
+- Frontend: a dedicated `permission` window (`permission.html`/`permission.ts`,
+  Vite multipage, second window in tauri.conf) — tool + detail + Allow/Deny,
+  Esc = defer. 72 Rust tests (8 new), clippy/fmt/npm build clean.
+
+**On timeout / app-down: defers to Claude's own terminal prompt** (never silently
+allows or blocks). **Owed: live verification** — trigger a real tool permission,
+confirm Allow lets it run, Deny blocks it with a message, hotkeys work, and a
+timeout falls back. ⚠️ On the next launch with the bridge connected, burnRat now
+installs the `PermissionRequest` hook and will gate tool prompts. v1 shows one
+bubble at a time (a second concurrent request waits out its timeout → defer).
+
+### Original plan
 
 Goal: a floating Allow/Deny bubble. When Claude Code requests a tool permission,
 the user decides from the pet (click or global hotkey) and the decision is sent

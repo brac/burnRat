@@ -5,6 +5,7 @@ mod data;
 mod events;
 mod hookbridge;
 mod hookinstall;
+mod permission;
 mod rate;
 mod state;
 mod userconfig;
@@ -13,6 +14,12 @@ mod userconfig;
 /// `main`). Runs the fire-and-forget hook client and returns its exit code.
 pub fn run_hook(event: &str) -> i32 {
     hookbridge::run_hook_client(event)
+}
+
+/// Entry point for the `burnrat permission` subcommand (dispatched from `main`).
+/// Forwards a tool-permission request to the running app and prints the decision.
+pub fn run_permission() -> i32 {
+    hookbridge::run_permission_client()
 }
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -53,8 +60,12 @@ struct Shared {
     /// loop each tick to refine the JSONL-inferred state (#1). Always present;
     /// empty (and so a no-op) until the bridge receives an event.
     hook_state: Arc<Mutex<hookbridge::HookState>>,
+    /// In-flight tool-permission requests awaiting a user decision (Phase 2).
+    permissions: Arc<permission::PermissionRegistry>,
     /// Candidate ports for the hook bridge (from `localServer.ports`).
     local_server_ports: Vec<u16>,
+    /// How long a permission request waits for a decision before falling back.
+    permission_timeout_seconds: u64,
 }
 
 impl Shared {
@@ -155,12 +166,36 @@ fn toggle_click_through(app: &tauri::AppHandle, shared: &Shared) {
     apply_click_through(app, next);
 }
 
+/// Build the bubble Notifier: emit the event to the frontend and show/hide the
+/// dedicated permission window. Runs on the bridge's connection thread, so it
+/// only uses thread-safe `AppHandle` calls.
+fn permission_notifier(app: &tauri::AppHandle) -> hookbridge::Notifier {
+    let app = app.clone();
+    Arc::new(move |name: &str, payload: serde_json::Value| {
+        let _ = app.emit(name, &payload);
+        match name {
+            "permission-request" => {
+                if let Some(w) = app.get_webview_window("permission") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }
+            "permission-resolved" => {
+                if let Some(w) = app.get_webview_window("permission") {
+                    let _ = w.hide();
+                }
+            }
+            _ => {}
+        }
+    })
+}
+
 /// Opt into / out of the loopback hook bridge. Connecting installs burnRat's
 /// hooks into `~/.claude/settings.json` and starts the listener; disconnecting
 /// removes the hooks (the listener keeps running until restart — harmless, as
 /// nothing posts to it once the hooks are gone). Persists the choice so it
 /// survives a restart. Returns the new connected state (or an error string).
-fn set_hooks_connected(shared: &Shared, on: bool) -> Result<bool, String> {
+fn set_hooks_connected(app: &tauri::AppHandle, shared: &Shared, on: bool) -> Result<bool, String> {
     if on {
         let exe = std::env::current_exe().map_err(|e| format!("resolve current exe: {e}"))?;
         hookinstall::install(&exe)?;
@@ -173,6 +208,9 @@ fn set_hooks_connected(shared: &Shared, on: bool) -> Result<bool, String> {
             *slot = hookbridge::HookServer::start(
                 &shared.local_server_ports,
                 shared.hook_state.clone(),
+                shared.permissions.clone(),
+                permission_notifier(app),
+                std::time::Duration::from_secs(shared.permission_timeout_seconds),
             );
             if slot.is_none() {
                 // Roll back the install so we don't point hooks at a dead port.
@@ -475,6 +513,27 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
 /// Falls back to the first valid character if the selected id is unknown (e.g.
 /// the user's saved character folder was removed). Returns `None` only when no
 /// valid character exists at all.
+/// Resolve a pending tool-permission request from the bubble UI. `behavior` is
+/// "allow" / "deny" (an unknown value resolves to no-decision → Claude falls
+/// back to its own prompt). The blocked `/permission` handler wakes and replies.
+#[tauri::command]
+fn resolve_permission(
+    shared: tauri::State<'_, Arc<Shared>>,
+    id: u64,
+    behavior: String,
+    message: Option<String>,
+) {
+    let decision = permission::Decision::from_behavior(&behavior, message);
+    shared.permissions.resolve(id, decision);
+}
+
+/// The current pending permission request (most recent), for the bubble to pull
+/// when it's shown — robust against a missed emit to the freshly-shown window.
+#[tauri::command]
+fn current_permission(shared: tauri::State<'_, Arc<Shared>>) -> Option<permission::PermissionInfo> {
+    shared.permissions.current()
+}
+
 #[tauri::command]
 fn active_character(shared: tauri::State<'_, Arc<Shared>>) -> Option<character::ResolvedCharacter> {
     let selected = shared.user.lock().ok().map(|u| u.character.clone());
@@ -653,7 +712,7 @@ fn build_tray(app: &tauri::App, shared: Arc<Shared>) -> tauri::Result<()> {
                         .lock()
                         .map(|u| u.local_server_enabled)
                         .unwrap_or(false);
-                    match set_hooks_connected(&shared, want) {
+                    match set_hooks_connected(app, &shared, want) {
                         Ok(now_on) => {
                             let _ = connect.set_checked(now_on);
                         }
@@ -713,7 +772,11 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![active_character])
+        .invoke_handler(tauri::generate_handler![
+            active_character,
+            resolve_permission,
+            current_permission
+        ])
         .setup(move |app| {
             let config = Config::load();
 
@@ -753,7 +816,9 @@ pub fn run() {
                 characters,
                 hook_server: Mutex::new(None),
                 hook_state: Arc::new(Mutex::new(hookbridge::HookState::default())),
+                permissions: Arc::new(permission::PermissionRegistry::new()),
                 local_server_ports: config.settings.local_server.ports.clone(),
+                permission_timeout_seconds: config.settings.local_server.permission_timeout_seconds,
             });
 
             // Manage the shared state so the `active_character` command can reach
@@ -766,7 +831,7 @@ pub fn run() {
             // dev/release/updates) and reconciles if the hooks were removed
             // out-of-band. The backup is taken only once, on the first install.
             if hooks_enabled {
-                if let Err(e) = set_hooks_connected(&shared, true) {
+                if let Err(e) = set_hooks_connected(app.handle(), &shared, true) {
                     eprintln!("burnRat: auto-connect to Claude Code failed: {e}");
                 }
             }
@@ -780,13 +845,18 @@ pub fn run() {
 
             build_tray(app, shared.clone())?;
 
-            // Global shortcut: Ctrl/Cmd+Shift+M toggles pass-through (so clicks
-            // fall through to the app underneath when the rat is in the way).
+            // Global shortcuts:
+            //   Ctrl/Cmd+Shift+M — toggle pass-through (clicks fall through).
+            //   Ctrl/Cmd+Shift+Y / +N — Allow / Deny the current permission
+            //   request from anywhere (no need to focus the bubble). No-op when
+            //   nothing is pending.
             {
                 use tauri_plugin_global_shortcut::{
                     Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
                 };
-                let sc = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyM);
+                let mods = Modifiers::CONTROL | Modifiers::SHIFT;
+
+                let sc = Shortcut::new(Some(mods), Code::KeyM);
                 let sc_shared = shared.clone();
                 if let Err(e) =
                     app.global_shortcut()
@@ -797,6 +867,29 @@ pub fn run() {
                         })
                 {
                     eprintln!("burnRat: failed to register move-mode shortcut: {e}");
+                }
+
+                for (code, decision) in [
+                    (Code::KeyY, permission::Decision::Allow),
+                    (
+                        Code::KeyN,
+                        permission::Decision::Deny("Denied via burnRat".into()),
+                    ),
+                ] {
+                    let sc = Shortcut::new(Some(mods), code);
+                    let sc_shared = shared.clone();
+                    if let Err(e) =
+                        app.global_shortcut()
+                            .on_shortcut(sc, move |_app, _shortcut, event| {
+                                if event.state() == ShortcutState::Pressed {
+                                    if let Some(id) = sc_shared.permissions.latest() {
+                                        sc_shared.permissions.resolve(id, decision.clone());
+                                    }
+                                }
+                            })
+                    {
+                        eprintln!("burnRat: failed to register permission shortcut: {e}");
+                    }
                 }
             }
 

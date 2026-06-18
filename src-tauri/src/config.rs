@@ -61,6 +61,15 @@ pub struct Settings {
 pub struct LocalServerCfg {
     pub enabled: bool,
     pub ports: Vec<u16>,
+    /// How long (seconds) a tool-permission request waits for the user to decide
+    /// before the bridge gives up and returns "no decision" (Claude Code then
+    /// falls back to its own terminal prompt). Kept below Claude's hook timeout.
+    #[serde(default = "default_permission_timeout")]
+    pub permission_timeout_seconds: u64,
+}
+
+fn default_permission_timeout() -> u64 {
+    300
 }
 
 /// Rate-readout auto-scale cutoffs (tokens/min). The readout prefers tok/sec and

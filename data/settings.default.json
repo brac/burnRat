@@ -21,7 +21,9 @@
   "$localServerNote": "DEFAULT ON. A loopback-only (127.0.0.1) HTTP listener that Claude Code lifecycle hooks POST to, for instant, precise state edges (turn start/stop, tool use) instead of inferring everything from the JSONL tail. When enabled, burnRat installs its hook entries into ~/.claude/settings.json on launch (idempotent; backs the file up once) and binds a port (written to ~/.burnrat/runtime.json so the hook subcommand can find it). Turn it off from the tray ('Connect to Claude Code') — that uninstalls the hooks; disabled = no socket, no hooks (the old no-network behavior). `ports` is the candidate range; the first free one is bound.",
   "localServer": {
     "enabled": true,
-    "ports": [23333, 23334, 23335, 23336, 23337]
+    "ports": [23333, 23334, 23335, 23336, 23337],
+    "$permissionTimeoutNote": "How long (seconds) a tool-permission request waits for you to click Allow/Deny (or hit the hotkey) before the bridge returns 'no decision' and Claude Code falls back to its own terminal prompt. Keep below Claude's hook timeout (~10 min default).",
+    "permissionTimeoutSeconds": 300
   },
   "opacity": 1.0,
   "$characterNote": "Active character id — a folder under characters/ (dev: repo, prod: bundled resources, plus a user drop-in dir). The folder's character.json + ~10 PNGs supply every pose; swap live from the tray Character submenu.",

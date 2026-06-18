@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>burnRat — permission</title>
+    <style>
+      /* The window is transparent + frameless; this card is the visible bubble. */
+      :root { color-scheme: dark; }
+      html, body {
+        margin: 0;
+        height: 100%;
+        background: transparent;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        -webkit-user-select: none;
+        user-select: none;
+        overflow: hidden;
+      }
+      #card {
+        box-sizing: border-box;
+        height: 100%;
+        margin: 4px;
+        padding: 7px 9px;
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+        background: #1e1f24;
+        border: 1px solid #3a3d46;
+        border-radius: 10px;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+        color: #e7e8ec;
+      }
+      #title { font-size: 11px; color: #aab; }
+      #title b { color: #fff; }
+      #detail {
+        font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+        font-size: 11px;
+        line-height: 1.3;
+        background: #15161a;
+        border: 1px solid #2c2e36;
+        border-radius: 6px;
+        padding: 4px 6px;
+        max-height: 34px;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+        color: #d6d8de;
+      }
+      #buttons { display: flex; gap: 6px; margin-top: auto; }
+      button {
+        flex: 1;
+        padding: 5px 0;
+        border-radius: 7px;
+        border: 1px solid transparent;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      #allow { background: #2e7d46; color: #fff; }
+      #allow:hover { background: #369152; }
+      #deny { background: #3a3d46; color: #fff; }
+      #deny:hover { background: #4a4e59; }
+      .hint { font-size: 9px; color: #777b86; text-align: center; }
+      kbd {
+        font-family: inherit;
+        background: #2c2e36;
+        border-radius: 4px;
+        padding: 0 3px;
+      }
+    </style>
+    <script type="module" src="/src/permission.ts" defer></script>
+  </head>
+  <body>
+    <div id="card">
+      <div id="title">Claude wants to use <b id="tool">a tool</b></div>
+      <div id="detail"></div>
+      <div id="buttons">
+        <button id="allow" type="button">Allow</button>
+        <button id="deny" type="button">Deny</button>
+      </div>
+      <div class="hint">
+        <kbd>Ctrl+Shift+Y</kbd> allow · <kbd>Ctrl+Shift+N</kbd> deny ·
+        <kbd>Esc</kbd> ask in terminal
+      </div>
+    </div>
+  </body>
+</html>

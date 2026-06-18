@@ -28,6 +28,24 @@
         "minimizable": false,
         "closable": true,
         "focus": false
+      },
+      {
+        "label": "permission",
+        "url": "permission.html",
+        "title": "burnRat — permission",
+        "width": 296,
+        "height": 124,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "shadow": false,
+        "maximizable": false,
+        "minimizable": false,
+        "visible": false,
+        "center": true,
+        "focus": true
       }
     ],
     "security": {

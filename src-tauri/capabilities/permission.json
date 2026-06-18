@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "permission-bubble",
+  "description": "IPC for the Allow/Deny permission bubble window: listen for events, call the resolve/current commands, hide + focus itself.",
+  "windows": ["permission"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-hide",
+    "core:window:allow-show",
+    "core:window:allow-set-focus"
+  ]
+}

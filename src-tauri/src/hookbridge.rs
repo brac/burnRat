@@ -23,6 +23,16 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::data::Awaiting;
+use crate::permission::{Decision, PermissionRegistry};
+
+/// UI callback the bridge invokes to drive the permission bubble: `(event_name,
+/// payload)`. The lib supplies a closure that emits the Tauri event + shows/hides
+/// the bubble window; tests pass a no-op. Boxed so this module stays Tauri-free.
+pub type Notifier = Arc<dyn Fn(&str, Value) + Send + Sync + 'static>;
+
+/// Read timeout for the blocking `burnrat permission` client. A backstop only —
+/// the server always answers first (at `permissionTimeoutSeconds` → no-decision).
+const PERMISSION_READ_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Identifying response header so the client can confirm it reached *our*
 /// listener and not some other service squatting on the port.
@@ -71,7 +81,13 @@ impl HookServer {
     /// Bind the first free port in `ports`, write the runtime file so the hook
     /// client can find us, and spawn the accept loop writing into `state`.
     /// Returns `None` if no port could be bound.
-    pub fn start(ports: &[u16], state: Arc<Mutex<HookState>>) -> Option<HookServer> {
+    pub fn start(
+        ports: &[u16],
+        state: Arc<Mutex<HookState>>,
+        registry: Arc<PermissionRegistry>,
+        notify: Notifier,
+        perm_timeout: Duration,
+    ) -> Option<HookServer> {
         let candidates: &[u16] = if ports.is_empty() {
             &DEFAULT_PORTS
         } else {
@@ -93,8 +109,11 @@ impl HookServer {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
                 let st = state.clone();
-                // One short-lived thread per connection; hooks fire rarely.
-                std::thread::spawn(move || handle_connection(stream, st));
+                let reg = registry.clone();
+                let nf = notify.clone();
+                // One short-lived thread per connection; a /permission handler
+                // blocks this thread until the user decides (or it times out).
+                std::thread::spawn(move || handle_connection(stream, st, reg, nf, perm_timeout));
             }
         });
 
@@ -213,9 +232,18 @@ fn read_runtime_port() -> Option<u16> {
 // Server side: parse a tiny HTTP/1.1 request and route it.
 // ---------------------------------------------------------------------------
 
-fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<HookState>>) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+fn handle_connection(
+    mut stream: TcpStream,
+    state: Arc<Mutex<HookState>>,
+    registry: Arc<PermissionRegistry>,
+    notify: Notifier,
+    perm_timeout: Duration,
+) {
+    // /state is fire-and-forget (short read); /permission blocks for the user,
+    // so don't impose a short read timeout on the whole connection. The request
+    // line + headers + small body arrive promptly; the wait is after parsing.
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
 
     let Some(req) = read_request(&mut stream) else {
         let _ = write_response(&mut stream, 400, "{\"error\":\"bad request\"}");
@@ -228,6 +256,12 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<HookState>>) {
             record_event(&state, payload);
             let _ = write_response(&mut stream, 200, "{\"ok\":true}");
         }
+        // Blocking: park the request, show the bubble, wait for the decision.
+        ("POST", "/permission") => {
+            let payload = serde_json::from_slice::<Value>(&req.body).unwrap_or(Value::Null);
+            let body = handle_permission(payload, &registry, &notify, perm_timeout);
+            let _ = write_response(&mut stream, 200, &body);
+        }
         // A cheap liveness probe (used by the client to confirm it's us).
         ("GET", "/health") => {
             let _ = write_response(&mut stream, 200, "{\"ok\":true}");
@@ -235,6 +269,68 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<HookState>>) {
         _ => {
             let _ = write_response(&mut stream, 404, "{\"error\":\"not found\"}");
         }
+    }
+}
+
+/// Park a permission request, drive the bubble via `notify`, and block until the
+/// user decides or `timeout` elapses. Returns the response body the client maps
+/// to Claude's stdout. Loopback only, so the request is trusted.
+fn handle_permission(
+    payload: Value,
+    registry: &PermissionRegistry,
+    notify: &Notifier,
+    timeout: Duration,
+) -> String {
+    let tool = payload
+        .get("tool_name")
+        .and_then(|t| t.as_str())
+        .unwrap_or("a tool")
+        .to_string();
+    let detail = summarize_tool_input(&payload);
+    let (id, rx) = registry.register(tool.clone(), detail.clone());
+    notify(
+        "permission-request",
+        serde_json::json!({ "id": id, "tool": tool, "detail": detail }),
+    );
+
+    let decision = rx.recv_timeout(timeout).unwrap_or(Decision::Defer);
+    registry.forget(id);
+    notify("permission-resolved", serde_json::json!({ "id": id }));
+
+    decision_to_body(&decision)
+}
+
+/// The bridge's generic decision wire-format (the client maps it to Claude's
+/// hook stdout). `none` = no decision → Claude falls back to its own prompt.
+fn decision_to_body(d: &Decision) -> String {
+    match d {
+        Decision::Allow => serde_json::json!({ "behavior": "allow" }),
+        Decision::Deny(msg) => serde_json::json!({ "behavior": "deny", "message": msg }),
+        Decision::Defer => serde_json::json!({ "behavior": "none" }),
+    }
+    .to_string()
+}
+
+/// A short, human-readable summary of a tool call for the bubble — the most
+/// informative field (command / path / url / pattern), else compact JSON.
+fn summarize_tool_input(payload: &Value) -> String {
+    let Some(input) = payload.get("tool_input") else {
+        return String::new();
+    };
+    for key in ["command", "file_path", "path", "url", "pattern", "query"] {
+        if let Some(v) = input.get(key).and_then(|x| x.as_str()) {
+            return truncate(v, 240);
+        }
+    }
+    truncate(&input.to_string(), 240)
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let head: String = s.chars().take(max).collect();
+        format!("{head}…")
     }
 }
 
@@ -389,6 +485,121 @@ pub fn run_hook_client(event: &str) -> i32 {
     0
 }
 
+/// Entry point for `burnrat permission`. Reads the `PermissionRequest` payload
+/// Claude Code pipes on stdin, forwards it to the running bridge's blocking
+/// `/permission` endpoint, and waits for the decision — then prints the
+/// `hookSpecificOutput` JSON Claude expects on stdout (Allow/Deny), or nothing
+/// (no decision → Claude falls back to its own prompt). Always exits 0; if the
+/// app isn't running we simply emit nothing and Claude prompts as usual.
+pub fn run_permission_client() -> i32 {
+    let mut raw = String::new();
+    let _ = std::io::stdin().read_to_string(&mut raw);
+    let payload: Value = serde_json::from_str(raw.trim()).unwrap_or(Value::Null);
+    let body_text = payload.to_string();
+
+    let mut candidates: Vec<u16> = Vec::new();
+    if let Some(p) = read_runtime_port() {
+        candidates.push(p);
+    }
+    for p in DEFAULT_PORTS {
+        if !candidates.contains(&p) {
+            candidates.push(p);
+        }
+    }
+
+    for port in candidates {
+        if let Some(resp) = post_permission(port, &body_text) {
+            if let Some(out) = format_permission_stdout(&resp) {
+                println!("{out}");
+            }
+            return 0;
+        }
+    }
+    0
+}
+
+/// POST the request to `/permission` and block (long read timeout) for the
+/// decision body. Returns the response body, or `None` if we didn't reach a
+/// confirmed burnRat server.
+fn post_permission(port: u16, body: &str) -> Option<String> {
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let mut stream = TcpStream::connect_timeout(&addr, CLIENT_TIMEOUT).ok()?;
+    let _ = stream.set_write_timeout(Some(CLIENT_TIMEOUT));
+    let _ = stream.set_read_timeout(Some(PERMISSION_READ_TIMEOUT));
+
+    let request = format!(
+        "POST /permission HTTP/1.1\r\n\
+         Host: 127.0.0.1\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).ok()?;
+    let _ = stream.flush();
+
+    let mut resp = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                resp.extend_from_slice(&chunk[..n]);
+                if resp.len() > MAX_REQUEST_BYTES {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    let text = String::from_utf8_lossy(&resp);
+    if !text
+        .to_lowercase()
+        .contains(&format!("{SERVER_HEADER}: {SERVER_ID}"))
+    {
+        return None;
+    }
+    let body_start = text.find("\r\n\r\n")? + 4;
+    Some(text[body_start..].to_string())
+}
+
+/// Map the bridge's `{behavior}` response body to the `PermissionRequest` hook
+/// stdout Claude Code expects. Returns `None` for "none"/unknown → print nothing
+/// (no decision → Claude's own prompt).
+fn format_permission_stdout(body: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(body.trim()).ok()?;
+    match v.get("behavior").and_then(|b| b.as_str())? {
+        "allow" => Some(
+            serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": { "behavior": "allow" }
+                }
+            })
+            .to_string(),
+        ),
+        "deny" => {
+            let msg = v
+                .get("message")
+                .and_then(|m| m.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("Denied via burnRat");
+            Some(
+                serde_json::json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PermissionRequest",
+                        "decision": { "behavior": "deny", "message": msg }
+                    }
+                })
+                .to_string(),
+            )
+        }
+        _ => None,
+    }
+}
+
 /// POST the body to `127.0.0.1:<port>/state`. Returns `true` only if we reached
 /// a confirmed burnRat server (identifying header present).
 fn post_state(port: u16, body: &str) -> bool {
@@ -499,7 +710,10 @@ mod tests {
         std::env::set_var("BURNRAT_RUNTIME_FILE", &tmp);
 
         let state = Arc::new(Mutex::new(HookState::default()));
-        let server = HookServer::start(&[0], state.clone()).expect("bind ephemeral port");
+        let registry = Arc::new(PermissionRegistry::new());
+        let noop: Notifier = Arc::new(|_, _| {});
+        let server = HookServer::start(&[0], state.clone(), registry, noop, Duration::from_secs(1))
+            .expect("bind ephemeral port");
         let body = serde_json::json!({ "event": "PreToolUse", "payload": { "tool_name": "Bash" } })
             .to_string();
         assert!(post_state(server.port, &body));
@@ -586,5 +800,54 @@ mod tests {
             fuse_awaiting(Awaiting::Done, Some(secs(90)), None, 120, secs(100)),
             Awaiting::Done
         );
+    }
+
+    #[test]
+    fn summarize_prefers_informative_field() {
+        let bash = serde_json::json!({ "tool_input": { "command": "rm -rf build" } });
+        assert_eq!(summarize_tool_input(&bash), "rm -rf build");
+        let edit = serde_json::json!({ "tool_input": { "file_path": "/tmp/x.rs", "old": "a" } });
+        assert_eq!(summarize_tool_input(&edit), "/tmp/x.rs");
+        // No tool_input → empty.
+        assert_eq!(summarize_tool_input(&serde_json::json!({})), "");
+    }
+
+    #[test]
+    fn format_stdout_maps_behaviors() {
+        let allow = format_permission_stdout(r#"{"behavior":"allow"}"#).unwrap();
+        assert!(allow.contains("\"behavior\":\"allow\"") && allow.contains("PermissionRequest"));
+        let deny = format_permission_stdout(r#"{"behavior":"deny","message":"no"}"#).unwrap();
+        assert!(deny.contains("\"behavior\":\"deny\"") && deny.contains("\"no\""));
+        // No decision → nothing to print.
+        assert!(format_permission_stdout(r#"{"behavior":"none"}"#).is_none());
+    }
+
+    #[test]
+    fn handle_permission_allow_round_trip() {
+        let reg = Arc::new(PermissionRegistry::new());
+        let reg2 = reg.clone();
+        // The notifier fires synchronously when the request is parked; resolve it
+        // Allow from a background thread so the blocked handler wakes.
+        let notify: Notifier = Arc::new(move |name: &str, payload: Value| {
+            if name == "permission-request" {
+                let id = payload.get("id").and_then(|i| i.as_u64()).unwrap();
+                let r = reg2.clone();
+                std::thread::spawn(move || {
+                    r.resolve(id, Decision::Allow);
+                });
+            }
+        });
+        let payload = serde_json::json!({"tool_name":"Bash","tool_input":{"command":"ls"}});
+        let body = handle_permission(payload, &reg, &notify, Duration::from_secs(5));
+        assert!(body.contains("\"behavior\":\"allow\""), "got: {body}");
+    }
+
+    #[test]
+    fn handle_permission_times_out_to_no_decision() {
+        let reg = Arc::new(PermissionRegistry::new());
+        let noop: Notifier = Arc::new(|_, _| {});
+        let payload = serde_json::json!({"tool_name":"Bash"});
+        let body = handle_permission(payload, &reg, &noop, Duration::from_millis(50));
+        assert!(body.contains("\"behavior\":\"none\""), "got: {body}");
     }
 }

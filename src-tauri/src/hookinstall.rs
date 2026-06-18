@@ -43,11 +43,22 @@ fn hook_command(exe: &Path, event: &str) -> String {
     format!("\"{}\" hook {event}", exe.display())
 }
 
+/// The blocking permission hook command: `"<exe>" permission` (reads the request
+/// on stdin, prints the Allow/Deny decision on stdout — see hookbridge).
+fn permission_command(exe: &Path) -> String {
+    format!("\"{}\" permission", exe.display())
+}
+
+/// Per-permission-hook timeout (seconds). Generous so the user has time to
+/// decide; if it lapses the bridge already returned no-decision well before.
+const PERMISSION_HOOK_TIMEOUT_SECS: u64 = 600;
+
 /// Whether a hook command was written by us — it invokes a `burnrat` binary with
-/// the `hook` subcommand. Used to remove/replace only our entries.
+/// one of our subcommands (`hook <Event>` or `permission`). Used to remove or
+/// replace only our entries, never another tool's.
 fn command_is_ours(cmd: &str) -> bool {
     let lower = cmd.to_lowercase();
-    lower.contains("burnrat") && lower.contains(" hook ")
+    lower.contains("burnrat") && (lower.contains(" hook ") || lower.contains(" permission"))
 }
 
 /// Are burnRat hooks currently present in `settings.json`? Used to reconcile the
@@ -111,6 +122,23 @@ pub fn install(exe: &Path) -> Result<(), String> {
             } ],
         }));
     }
+
+    // The blocking permission hook (Phase 2): a `PermissionRequest` command hook
+    // that routes the Allow/Deny decision back through `burnrat permission`.
+    let perm_groups = hooks
+        .entry("PermissionRequest".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or("settings.json hooks.PermissionRequest is not an array")?;
+    strip_our_hooks(perm_groups);
+    perm_groups.push(json!({
+        "matcher": "",
+        "hooks": [ {
+            "type": "command",
+            "command": permission_command(exe),
+            "timeout": PERMISSION_HOOK_TIMEOUT_SECS,
+        } ],
+    }));
 
     write_settings(&path, &root)
 }
@@ -257,8 +285,10 @@ mod tests {
         assert!(command_is_ours(
             "\"C:\\\\Users\\\\x\\\\burnRat.exe\" hook PreToolUse"
         ));
+        // The blocking permission hook is ours too.
+        assert!(command_is_ours("\"/opt/burnrat/burnrat\" permission"));
         assert!(!command_is_ours("/usr/bin/some-other-tool notify"));
-        assert!(!command_is_ours("echo burnrat")); // no ` hook `
+        assert!(!command_is_ours("echo burnrat")); // neither subcommand
     }
 
     #[test]
