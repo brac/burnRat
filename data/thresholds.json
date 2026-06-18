@@ -38,6 +38,7 @@
   "idleTimeoutSeconds": 60,
   "$doneHoldNote": "How long to hold the 'done' pose after a finished turn before the rat naps. 120 = 2 minutes.",
   "doneHoldSeconds": 120,
-  "$sentHoldNote": "After the user sends a message we're awaiting Claude. Hold the 'thinking' pose this long before napping — longer than idleTimeoutSeconds so the rat doesn't nap through the 'dead air' before Claude starts responding. 180 = 3 minutes.",
-  "sentHoldSeconds": 180
+  "$sentNote": "While we're awaiting Claude's reply to a message we sent (Awaiting::Sent), the rat holds the 'thinking' pose and never naps — the wait ends the instant Claude responds. No timeout knob: not napping mid-wait is the whole point (Sleep Bug fix).",
+  "$hookSignalTtlNote": "Lifecycle-hook fusion (#1): when the opt-in hook bridge is connected, a hook edge (Stop/UserPromptSubmit/PreToolUse) refines the discrete state instantly instead of waiting on the JSONL tail. The more-recent of (hook, JSONL) wins; this TTL is a backstop so a stale hook can't override JSONL forever (e.g. after the app missed events). No effect when the bridge is disabled.",
+  "hookSignalTtlSeconds": 120
 }

@@ -3,9 +3,17 @@ mod character;
 mod config;
 mod data;
 mod events;
+mod hookbridge;
+mod hookinstall;
 mod rate;
 mod state;
 mod userconfig;
+
+/// Entry point for the `burnrat hook <Event>` subcommand (dispatched from
+/// `main`). Runs the fire-and-forget hook client and returns its exit code.
+pub fn run_hook(event: &str) -> i32 {
+    hookbridge::run_hook_client(event)
+}
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -38,6 +46,15 @@ struct Shared {
     /// Valid characters discovered at startup (immutable after setup). The
     /// selected id lives in `user.character`.
     characters: Vec<character::LoadedCharacter>,
+    /// The running loopback hook bridge, if the user has opted in. `None` until
+    /// "Connect to Claude Code" starts it (or at boot if already enabled).
+    hook_server: Mutex<Option<hookbridge::HookServer>>,
+    /// Latest lifecycle-hook edge, written by the bridge and read by the poll
+    /// loop each tick to refine the JSONL-inferred state (#1). Always present;
+    /// empty (and so a no-op) until the bridge receives an event.
+    hook_state: Arc<Mutex<hookbridge::HookState>>,
+    /// Candidate ports for the hook bridge (from `localServer.ports`).
+    local_server_ports: Vec<u16>,
 }
 
 impl Shared {
@@ -138,6 +155,41 @@ fn toggle_click_through(app: &tauri::AppHandle, shared: &Shared) {
     apply_click_through(app, next);
 }
 
+/// Opt into / out of the loopback hook bridge. Connecting installs burnRat's
+/// hooks into `~/.claude/settings.json` and starts the listener; disconnecting
+/// removes the hooks (the listener keeps running until restart — harmless, as
+/// nothing posts to it once the hooks are gone). Persists the choice so it
+/// survives a restart. Returns the new connected state (or an error string).
+fn set_hooks_connected(shared: &Shared, on: bool) -> Result<bool, String> {
+    if on {
+        let exe = std::env::current_exe().map_err(|e| format!("resolve current exe: {e}"))?;
+        hookinstall::install(&exe)?;
+        // Start the listener if it isn't already up.
+        let mut slot = shared
+            .hook_server
+            .lock()
+            .map_err(|_| "hook-server lock poisoned".to_string())?;
+        if slot.is_none() {
+            *slot = hookbridge::HookServer::start(
+                &shared.local_server_ports,
+                shared.hook_state.clone(),
+            );
+            if slot.is_none() {
+                // Roll back the install so we don't point hooks at a dead port.
+                let _ = hookinstall::uninstall();
+                return Err("could not bind a loopback port for the hook bridge".into());
+            }
+        }
+    } else {
+        hookinstall::uninstall()?;
+    }
+    if let Ok(mut u) = shared.user.lock() {
+        u.local_server_enabled = on;
+    }
+    shared.persist();
+    Ok(on)
+}
+
 /// Background loop: tail the JSONL, compute rate + blocks + state, emit.
 fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
     std::thread::spawn(move || {
@@ -156,7 +208,7 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
         let idle_timeout = config.thresholds.idle_timeout_seconds;
         let activity_floor = config.thresholds.activity_floor_seconds;
         let done_hold = config.thresholds.done_hold_seconds;
-        let sent_hold = config.thresholds.sent_hold_seconds;
+        let hook_ttl = config.thresholds.hook_signal_ttl_seconds;
         let cache_weight = config.settings.rate_cache_weight.max(0.0);
 
         // Self-calibrating usage ceiling for the approaching-limit warnings.
@@ -216,6 +268,22 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
             let grouped = blocks::group(&monitor.entries, window_hours, now);
             let active = blocks::active(&grouped);
 
+            // Lifecycle-hook fusion (#1): when the opt-in bridge is connected, a
+            // fresh hook edge (Stop / UserPromptSubmit / PreToolUse) refines the
+            // discrete state and keeps the rat awake the instant it happens,
+            // instead of waiting for the next poll + JSONL classification. The
+            // snapshot is empty — a pure no-op — whenever the bridge is off.
+            let hook_snap = shared.hook_state.lock().ok().and_then(|s| s.snapshot());
+            let hook_idle = hook_snap
+                .as_ref()
+                .map(|s| (now - s.at).num_seconds())
+                .unwrap_or(i64::MAX);
+            let hook_activity = hook_snap
+                .as_ref()
+                .filter(|s| (now - s.at).num_seconds() <= activity_floor)
+                .map(|s| hookbridge::hook_is_activity(&s.event))
+                .unwrap_or(false);
+
             // "awake" = there's an active window AND tokens flowed recently. After
             // idle_timeout seconds without new tokens the rat naps (sleeping),
             // rather than waiting the full 5h for the window to lapse.
@@ -223,16 +291,26 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
             // (user OR assistant), so sending a message resets it — no jarring
             // done -> message -> nap. The activity floor (perk-up to working) still
             // runs from the last *token*, so a user message alone isn't "working".
+            // Runs from the last conversational line OR the last hook edge,
+            // whichever is more recent — so any hook activity resets it too.
             let nap_idle = monitor
                 .last_activity()
                 .map(|t| (now - t).num_seconds())
-                .unwrap_or(i64::MAX);
+                .unwrap_or(i64::MAX)
+                .min(hook_idle);
 
             // What Claude is awaiting from the user. `asking` (an open question)
             // holds indefinitely; `done` (a finished turn) holds for done_hold
-            // seconds, then is allowed to nap.
+            // seconds, then is allowed to nap. A fresh hook edge overrides the
+            // JSONL inference (more-recent source wins; see fuse_awaiting).
             let kind = if active.is_some() {
-                monitor.awaiting()
+                hookbridge::fuse_awaiting(
+                    monitor.awaiting(),
+                    monitor.last_activity(),
+                    hook_snap.as_ref(),
+                    hook_ttl,
+                    now,
+                )
             } else {
                 Awaiting::None
             };
@@ -243,30 +321,39 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
             let error = matches!(kind, Awaiting::Error);
             let awaiting_user = done || asking;
 
-            // A fresh user message (awaiting Claude) holds the idle pose longer
-            // than a plain stall, so the rat doesn't nap through the dead air
-            // before Claude starts responding.
+            // We sent a message and are awaiting Claude's reply. Hold the idle
+            // "thinking" pose for the WHOLE wait — never nap mid-wait (Sleep
+            // Bug). Like an open question (`asking`), this clears the instant
+            // Claude responds (the latest line stops being our message).
             let sent = matches!(kind, Awaiting::Sent);
-            let idle_hold = if sent { sent_hold } else { idle_timeout };
 
-            let (consumed, consumed_with_cache, projected, remaining, base_awake, recent_activity) =
-                match active {
-                    Some(b) => {
-                        let token_idle = (now - b.actual_end).num_seconds();
-                        (
-                            b.work(),
-                            b.total_with_cache(),
-                            blocks::projected_work(b, smoothed, now),
-                            blocks::time_remaining_min(b, now),
-                            // Awaiting the user holds; otherwise nap after the
-                            // idle hold (longer right after a user message)
-                            // measured from the last conversational line.
-                            awaiting_user || nap_idle <= idle_hold,
-                            token_idle <= activity_floor,
-                        )
-                    }
-                    None => (0, 0, 0, 0, false, false),
-                };
+            let (
+                consumed,
+                consumed_with_cache,
+                projected,
+                remaining,
+                base_awake,
+                token_recent_activity,
+            ) = match active {
+                Some(b) => {
+                    let token_idle = (now - b.actual_end).num_seconds();
+                    (
+                        b.work(),
+                        b.total_with_cache(),
+                        blocks::projected_work(b, smoothed, now),
+                        blocks::time_remaining_min(b, now),
+                        // Awaiting the user (done/asking) holds, as does
+                        // awaiting Claude's reply (sent); otherwise nap once
+                        // idle past the timeout (from the last activity).
+                        awaiting_user || sent || nap_idle <= idle_timeout,
+                        token_idle <= activity_floor,
+                    )
+                }
+                None => (0, 0, 0, 0, false, false),
+            };
+            // Perk to at least `working` on a recent token OR a Claude tool hook
+            // (PreToolUse/PostToolUse/SubagentStop) — the hook is the instant cue.
+            let recent_activity = token_recent_activity || hook_activity;
 
             // Layer 3 — quota-refresh rising edge: the 5h window we were watching
             // just rolled over. A one-shot now (not a held pose), fed to the
@@ -523,8 +610,28 @@ fn build_tray(app: &tauri::App, shared: Arc<Shared>) -> tauri::Result<()> {
         .collect();
     let character_menu = Submenu::with_items(app, "Character", true, &char_refs)?;
 
+    // Hook-bridge opt-in (Phase 0). Checked = connected (hooks installed +
+    // listener running). Off by default; flipping it installs/removes the hooks
+    // in ~/.claude/settings.json.
+    let connected = shared
+        .user
+        .lock()
+        .map(|u| u.local_server_enabled)
+        .unwrap_or(false);
+    let connect = CheckMenuItem::with_id(
+        app,
+        "connect",
+        "Connect to Claude Code",
+        true,
+        connected,
+        None::<&str>,
+    )?;
+
     let quit = MenuItem::with_id(app, "quit", "Quit burnRat", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&toggle, &opacity_menu, &character_menu, &quit])?;
+    let menu = Menu::with_items(
+        app,
+        &[&toggle, &opacity_menu, &character_menu, &connect, &quit],
+    )?;
 
     TrayIconBuilder::new()
         // A rat silhouette (rendered white so it reads on the dark taskbar).
@@ -538,6 +645,30 @@ fn build_tray(app: &tauri::App, shared: Arc<Shared>) -> tauri::Result<()> {
             match id {
                 "toggle" => toggle_click_through(app, &shared),
                 "quit" => app.exit(0),
+                "connect" => {
+                    // Toggle relative to the persisted state, not the (already
+                    // flipped) checkbox, then sync the checkmark to the outcome.
+                    let want = !shared
+                        .user
+                        .lock()
+                        .map(|u| u.local_server_enabled)
+                        .unwrap_or(false);
+                    match set_hooks_connected(&shared, want) {
+                        Ok(now_on) => {
+                            let _ = connect.set_checked(now_on);
+                        }
+                        Err(e) => {
+                            eprintln!("burnRat: connect to Claude Code failed: {e}");
+                            // Leave the checkmark reflecting the real state.
+                            let actual = shared
+                                .user
+                                .lock()
+                                .map(|u| u.local_server_enabled)
+                                .unwrap_or(false);
+                            let _ = connect.set_checked(actual);
+                        }
+                    }
+                }
                 _ if id.starts_with("opacity:") => {
                     if let Ok(pct) = id.trim_start_matches("opacity:").parse::<u64>() {
                         shared.opacity_pct.store(pct, Ordering::Relaxed);
@@ -597,6 +728,7 @@ pub fn run() {
                 config.settings.plan.clone(),
                 config.settings.opacity,
                 config.settings.character.clone(),
+                config.settings.local_server.enabled,
             );
 
             let opacity_pct = (user.opacity * 100.0).round().clamp(0.0, 100.0) as u64;
@@ -612,17 +744,32 @@ pub fn run() {
                 user.character = characters[0].manifest.id.clone();
             }
 
+            let hooks_enabled = user.local_server_enabled;
             let shared = Arc::new(Shared {
                 opacity_pct: AtomicU64::new(opacity_pct),
                 click_through: AtomicBool::new(config.settings.click_through),
                 config_path,
                 user: Mutex::new(user),
                 characters,
+                hook_server: Mutex::new(None),
+                hook_state: Arc::new(Mutex::new(hookbridge::HookState::default())),
+                local_server_ports: config.settings.local_server.ports.clone(),
             });
 
             // Manage the shared state so the `active_character` command can reach
             // it (the poll loop / tray hold their own Arc clones).
             app.manage(shared.clone());
+
+            // Hook bridge enabled (default on, or persisted from a prior
+            // Connect): install the hooks + start the listener. Re-installing on
+            // every launch self-heals the command's exe path (it changes between
+            // dev/release/updates) and reconciles if the hooks were removed
+            // out-of-band. The backup is taken only once, on the first install.
+            if hooks_enabled {
+                if let Err(e) = set_hooks_connected(&shared, true) {
+                    eprintln!("burnRat: auto-connect to Claude Code failed: {e}");
+                }
+            }
 
             // Start in the configured click-through mode.
             apply_click_through(app.handle(), config.settings.click_through);

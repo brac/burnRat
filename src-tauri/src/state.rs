@@ -292,7 +292,7 @@ mod tests {
             activity_floor_seconds: 15,
             idle_timeout_seconds: 90,
             done_hold_seconds: 120,
-            sent_hold_seconds: 180,
+            hook_signal_ttl_seconds: 120,
         }
     }
 

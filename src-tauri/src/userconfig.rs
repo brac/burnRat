@@ -17,6 +17,11 @@ pub struct UserConfig {
     /// Defaults to the value in `settings.default.json`.
     #[serde(default)]
     pub character: String,
+    /// Whether the user has opted into the loopback hook bridge (tray "Connect
+    /// to Claude Code"). Persisted so the server auto-starts on the next launch.
+    /// Defaults to the value in `settings.default.json`.
+    #[serde(default)]
+    pub local_server_enabled: bool,
 }
 
 impl UserConfig {
@@ -25,6 +30,7 @@ impl UserConfig {
         default_plan: String,
         default_opacity: f64,
         default_character: String,
+        default_local_server_enabled: bool,
     ) -> Self {
         let mut cfg: UserConfig = std::fs::read_to_string(path)
             .ok()
@@ -33,6 +39,7 @@ impl UserConfig {
                 plan: default_plan,
                 opacity: default_opacity,
                 character: default_character.clone(),
+                local_server_enabled: default_local_server_enabled,
             });
         // An older settings.json (pre-character) deserializes with an empty
         // character via `#[serde(default)]` — backfill the configured default.

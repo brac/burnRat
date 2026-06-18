@@ -47,6 +47,20 @@ pub struct Settings {
     /// A learned ceiling below this many tokens is treated as not-yet-credible
     /// (too little history) and suppresses the approaching-limit warnings.
     pub limit_min_credible_tokens: u64,
+    /// Opt-in loopback hook bridge (off by default). The default `enabled` here
+    /// is just the factory setting; the user's live choice is persisted in
+    /// `UserConfig`.
+    pub local_server: LocalServerCfg,
+}
+
+/// Loopback hook-bridge listener (Phase 0). Disabled by default so burnRat opens
+/// no socket unless the user opts in from the tray. `ports` is the candidate
+/// range; the first free one is bound.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalServerCfg {
+    pub enabled: bool,
+    pub ports: Vec<u16>,
 }
 
 /// Rate-readout auto-scale cutoffs (tokens/min). The readout prefers tok/sec and
@@ -153,10 +167,10 @@ pub struct Thresholds {
     pub idle_timeout_seconds: i64,
     /// How long to hold the `done` pose after a finished turn before napping.
     pub done_hold_seconds: i64,
-    /// How long to hold the idle pose after the user sends a message (awaiting
-    /// Claude) before napping — longer than `idle_timeout_seconds` so we don't
-    /// nap through the "dead air" before Claude starts responding.
-    pub sent_hold_seconds: i64,
+    /// Backstop freshness (seconds) for a lifecycle-hook edge to override the
+    /// JSONL-inferred state (#1). Beyond this a stale hook is ignored. Only
+    /// matters when the opt-in hook bridge is connected.
+    pub hook_signal_ttl_seconds: i64,
 }
 
 #[derive(Debug, Clone)]
