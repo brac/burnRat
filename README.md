@@ -10,29 +10,35 @@ burnRat is an *ambient companion*, not a dashboard. It floats over whatever you'
 
 Claude Code writes one JSONL file per session to `~/.claude/projects/<project>/<conversation-id>.jsonl`, and every assistant turn records exact token usage. burnRat tails those files directly in Rust (no external dependency), computes a smoothed burn rate (tokens per minute), and maps it to a creature state. By default the signal includes cache tokens (`rateCacheWeight`, see [Tuning](#tuning)) for big, lively numbers; set the weight to `0` to watch only work (input + output) tokens.
 
-| State | When |
+The state is resolved in Rust as **three independent layers** the view composes:
+
+**Layer 1 — base pose** (one of seven, the fixed contract every character supplies):
+
+| Pose | When |
 |---|---|
-| `sleeping` | No new tokens for a while (idle nap) |
-| `calm` | Active window, low/no burn |
+| `sleeping` | No active window / idle nap |
+| `thinking` | Active but low/no burn — or pondering the latency gap right after you send a message |
 | `working` | Moderate burn (animated loop) |
-| `stressed` | High burn |
+| `frantic` | High burn |
 | `onfire` | Sustained very high burn |
-| `spent` | The crash *after* burning onfire — rate collapses and the rat slumps |
-| `waiting` | Claude is asking you something (`AskUserQuestion` / plan approval) |
-| `done` | Claude finished a turn — task complete, awaiting your next instruction |
-| `error` | Claude Code hit an API error — concerned, holds like `waiting` |
-| `refreshed` | Your 5-hour quota window just rolled over (fresh quota) — holds, then naps |
-| `approaching10`/`5`/`1` | Within 10% / 5% / 1% of your (auto-calibrated) usage limit — escalating glow |
-| `atlimit` | At your usage limit — shows a countdown to the window refresh |
-| `longrun` | A long-running session (shown over idle) |
+| `spent` | The crash *after* burning onfire — the rate collapses and the rat slumps |
+| `done` | Claude finished a turn or is asking you something — awaiting you |
 
-A brief **surprised** pop plays when the rat perks up from rest into work. Thresholds use hysteresis so it doesn't strobe on a noisy signal.
+**Layer 2 — near-limit overlay.** As you approach your (auto-calibrated) usage ceiling, a warning overlay fades in over whatever pose is showing, and the readout switches to a `%`, then a countdown to the window refresh once you're at the limit.
 
-**Napping is smart about your messages.** The nap clock runs from the last conversational line (yours *or* Claude's), so sending a message resets it — no jarring `done → message → nap`. Right after you send a message the rat holds the idle pose longer (`sentHoldSeconds`, default 3 min) so it doesn't nap through the dead air before Claude starts responding, then naps if nothing happens. The rat also won't nap while the burn rate is still elevated — it always winds down through its lower states (e.g. `onfire → stressed → working → calm → sleeping`) rather than snapping straight from a high state into a nap.
+**Layer 3 — transient events.** Brief one-shots that play over the base pose and hand control back: `refreshed` (your 5-hour quota window just rolled over — a ~5-minute celebration), `error` (Claude Code hit an API error), and `flinch` (a startle when the rat wakes from sleep into a sudden burst of work).
+
+Thresholds use hysteresis so the pose doesn't strobe on a noisy signal.
+
+**Napping is smart about your messages.** The nap clock runs from the last conversational line (yours *or* Claude's), so sending a message resets it — no jarring `done → message → nap`. Right after you send a message the rat holds the `thinking` pose longer (`sentHoldSeconds`, default 3 min) so it doesn't nap through the dead air before Claude starts responding, then naps if nothing happens. The rat also won't nap while the burn rate is still elevated — it always winds down through its lower states (e.g. `onfire → frantic → working → thinking → sleeping`) rather than snapping straight from a high state into a nap.
 
 ### Characters
 
-The pet is a **character** — a folder under [`characters/`](characters/) holding a `character.json` manifest plus ~10 PNGs, one per state (`sleeping`, `working`, `frantic`, …) plus a near-limit overlay and the transient event poses. Characters are discovered and loaded at **runtime**: drop a new folder in (bundled with the app, or in the per-user characters dir) and it appears in the tray **Character** submenu to swap live — no rebuild. The filename is the contract; extra ping-pong frames (`working_1.png`, `working_2.png`, …) are declared per-entry in the manifest (1 frame = static, 2 = alternate, 3+ = smooth ping-pong). The [`rat`](characters/rat/) is the reference character.
+The pet is a **character** — a folder under [`characters/`](characters/) holding a `character.json` manifest plus ~10 PNGs, one per base pose (`sleeping`, `working`, `frantic`, …) plus the near-limit overlay and the transient event poses. Characters are discovered and loaded at **runtime**: drop a new folder in (bundled with the app, or in the per-user characters dir) and it appears in the tray **Character** submenu to swap live — no rebuild. burnRat ships two: the [`rat`](characters/rat/) (reference) and a [flaming `skull`](characters/skull/).
+
+The **filename is the contract** and extra ping-pong frames **auto-discover** from the folder: drop `working_1.png`, `working_2.png`, … next to `working.png` and they join that pose's loop in order (1 frame = static, 2 = alternate, 3+ = smooth ping-pong) — no manifest edit. While developing (`tauri dev`), a file-watcher hot-reloads art the moment you change it.
+
+Art should be **300×300** (2× the 150×150 display) and well under ~100 KB. Run **`npm run optimize-art`** to resize/compress every PNG in place — lossless where it can, alpha preserved.
 
 ---
 
@@ -69,7 +75,7 @@ Produces a `.msi`/`.exe` on Windows and a `.app`/`.dmg` on macOS.
 
 - **Move it:** click and drag the rat anywhere on screen. Its position is remembered across restarts.
 - **Pass-through:** if the rat is ever in the way of a click, press **Ctrl/Cmd+Shift+M** (or use the tray menu) to let clicks fall through to the app underneath. Press again to make it grabbable.
-- **Tray menu:** toggle pass-through, set **Opacity**, and **Quit**.
+- **Tray menu:** toggle pass-through, set **Opacity**, pick a **Character** (swaps live), and **Quit**.
 
 ---
 
@@ -77,14 +83,14 @@ Produces a `.msi`/`.exe` on Windows and a `.app`/`.dmg` on macOS.
 
 All the magic numbers live in [`data/`](data/) and are read live in `dev` (no rebuild needed):
 
-- **`data/thresholds.json`** — burn-rate cutoffs per state (with up/down hysteresis), the onfire sustain time, the post-onfire `spent` crash, and the nap/hold timers: `idleTimeoutSeconds` (idle grace before the rat sleeps), `doneHoldSeconds` (how long the `done` pose holds after a finished turn), and `sentHoldSeconds` (how long the rat holds the idle pose after you send a message — longer, so it doesn't nap through the "dead air" before Claude responds).
+- **`data/thresholds.json`** — burn-rate cutoffs per state (with up/down hysteresis), the onfire sustain time, the post-onfire `spent` crash, the `quota` near-limit ramp (`startPercent`/`fullPercent`), the Layer-3 `events` config (priority order + `errorDebounceSeconds`/`refreshedCooldownSeconds`), and the nap/hold timers: `idleTimeoutSeconds` (idle grace before the rat sleeps), `doneHoldSeconds` (how long the `done` pose holds after a finished turn), and `sentHoldSeconds` (how long the rat holds the `thinking` pose after you send a message — longer, so it doesn't nap through the "dead air" before Claude responds).
 - **`data/settings.default.json`** — poll interval, rate smoothing window, 5-hour block window, default opacity, whether it starts interactive or pass-through, `display` (the tok/sec↔tok/min auto-scale cutoffs for the readout), `rateCacheWeight` (how much cache counts toward the burn signal — `1.0` = full cache/bigger numbers, `0.0` = work only; **retune `thresholds.json` if you change it**), and the usage-limit settings (`limitHistoryDays` / `limitMinCredibleTokens` for the auto-calibrated approaching-limit ceiling, plus `planLimits` as an optional manual override).
 
-The **approaching-limit warnings** (10%/5%/1% glows) calibrate the ceiling automatically: on startup burnRat scans your recent history for the largest *completed* 5-hour block (tokens incl. cache) and uses that as the limit estimate, rather than guessing a cap. It reads conservatively until you have history, and since your past peak is a lower bound on your true limit it can warn a little early — set a `planLimits` entry if you'd rather pin an exact cap.
+The **near-limit overlay** (Layer 2) calibrates its ceiling automatically: on startup burnRat scans your recent history for the largest *completed* 5-hour block (tokens incl. cache) and uses that as the limit estimate, rather than guessing a cap. The overlay opacity ramps in between `quota.startPercent` and `quota.fullPercent` of that ceiling. It reads conservatively until you have history, and since your past peak is a lower bound on your true limit it can warn a little early — set a `planLimits` entry if you'd rather pin an exact cap.
 
 The rate readout under the rat **auto-scales** between tokens/sec and tokens/min (with hysteresis so the unit doesn't flip-flop) and is **display-eased** on an animation-frame loop so the number glides smoothly over Claude's chunky, per-turn token writes — the underlying data smoothing is still `rateWindowSeconds`.
 
-User-changed settings (opacity) persist to your OS app-config dir; defaults are bundled into the binary.
+User-changed settings (opacity, selected character) persist to your OS app-config dir; defaults are bundled into the binary.
 
 ---
 
