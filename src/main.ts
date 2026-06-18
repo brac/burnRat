@@ -62,6 +62,18 @@ function framesFor(state: string): string[] {
   return FRAMES[STATE_BASE[state] ?? state] ?? FRAMES["idle"] ?? [];
 }
 
+// Dev-only: every pose the in-window picker can force. Keep in sync with
+// CreatureState::as_str() in src-tauri/src/state.rs, plus "surprised" (the
+// transient perk-up pose). Only used when import.meta.env.DEV is true.
+const DEV_STATES = [
+  "sleeping", "done", "waiting", "calm", "working", "stressed", "onfire",
+  "spent", "approaching10", "approaching5", "approaching1", "atlimit",
+  "refreshed", "error", "longrun", "surprised",
+];
+// Vite sets this true under `tauri dev`, false in a production build, so the
+// picker never ships. Read defensively so tsconfig need not include vite types.
+const DEV = Boolean((import.meta as { env?: { DEV?: boolean } }).env?.DEV);
+
 // Per-model hats, auto-discovered from src/hats/ by model family
 // (`opus.png`, `sonnet.png`, …). TODO: no hat art exists yet — drop files in
 // and they light up automatically; until then the overlay stays hidden.
@@ -113,6 +125,17 @@ window.addEventListener("DOMContentLoaded", () => {
   let countdownMin = 0; // minutes until window refresh (shown when at-limit)
   let liveModel = "none";
 
+  // Dev-only forced pose (set via the in-window picker); null = follow live
+  // state. When set, it overrides the sprite, the pet class, and the readout.
+  let devForced: string | null = null;
+  const shownState = () => devForced ?? liveState;
+
+  // Paint the pet container class from the effective state + model. Called from
+  // the game-state listener and whenever the dev override changes.
+  function paintClass() {
+    if (pet) pet.className = `pet state-${shownState()} model-${liveModel}`;
+  }
+
   // Readout easing state, driven on its own animation-frame loop so the number
   // glides smoothly between the sparse, event-driven backend updates.
   let targetTpm = 0; // latest smoothed rate from Rust
@@ -124,7 +147,7 @@ window.addEventListener("DOMContentLoaded", () => {
   function easeReadout() {
     if (readout) {
       let text = "";
-      if (liveState === "atlimit") {
+      if (shownState() === "atlimit") {
         // At the limit, show the countdown to the quota refresh instead of rate.
         text = `${formatCountdown(countdownMin)} ⏳`;
       } else if (rateActive) {
@@ -148,8 +171,12 @@ window.addEventListener("DOMContentLoaded", () => {
   // 2 frames alternate, 3+ make a smooth back-and-forth.
   setInterval(() => {
     if (!sprite) return;
+    // A dev-forced pose wins outright (including a forced "surprised"); otherwise
+    // the transient perk-up pose shows while its latch is live, else live state.
     const frames =
-      Date.now() < surprisedUntil ? framesFor("surprised") : framesFor(liveState);
+      devForced === null && Date.now() < surprisedUntil
+        ? framesFor("surprised")
+        : framesFor(shownState());
     const n = frames.length;
     if (n === 0) return;
     const period = n <= 1 ? 1 : 2 * (n - 1);
@@ -174,12 +201,8 @@ window.addEventListener("DOMContentLoaded", () => {
     liveState = s.state;
     countdownMin = s.timeRemainingMin;
 
-    if (pet) {
-      pet.className = `pet state-${s.state} model-${s.model}`;
-      pet.style.opacity = String(s.opacity);
-    }
-
-    // Per-model hat overlay (hidden when there's no art for this model).
+    // Per-model hat overlay (hidden when there's no art for this model). Runs
+    // before paintClass so liveModel is current for the class string.
     if (hat && s.model !== liveModel) {
       liveModel = s.model;
       const url = HATS[s.model];
@@ -192,9 +215,77 @@ window.addEventListener("DOMContentLoaded", () => {
       }
     }
 
+    // A dev-forced pose pins the class; otherwise track the live state.
+    paintClass();
+    if (pet) pet.style.opacity = String(s.opacity);
+
     // Feed the eased readout loop; it renders on its own frame cadence.
     rateActive = s.isActive;
     targetTpm = s.smoothedTpm;
     rateUnit = s.rateUnit;
   });
+
+  // ---- Dev-only in-window state picker (never built in a release) ----
+  // A single <select> (one clearly-selected pose, "live" to clear) plus a Cycle
+  // toggle that sweeps every state. Replaces the old tray submenu whose stuck
+  // checkmarks were confusing.
+  if (DEV) {
+    let cycleTimer: number | null = null;
+
+    const panel = document.createElement("div");
+    panel.id = "dev-panel";
+
+    const select = document.createElement("select");
+    const live = document.createElement("option");
+    live.value = "";
+    live.textContent = "— live —";
+    select.appendChild(live);
+    for (const name of DEV_STATES) {
+      const opt = document.createElement("option");
+      opt.value = name;
+      opt.textContent = name;
+      select.appendChild(opt);
+    }
+
+    const cycleBtn = document.createElement("button");
+    cycleBtn.textContent = "cycle";
+
+    // Set the forced pose, sync the dropdown, and repaint immediately (no need
+    // to wait for the next backend tick).
+    const setForced = (name: string | null) => {
+      devForced = name;
+      select.value = name ?? "";
+      paintClass();
+    };
+    const stopCycle = () => {
+      if (cycleTimer !== null) {
+        clearInterval(cycleTimer);
+        cycleTimer = null;
+        cycleBtn.classList.remove("on");
+      }
+    };
+
+    select.addEventListener("change", () => {
+      stopCycle();
+      setForced(select.value || null);
+    });
+    cycleBtn.addEventListener("click", () => {
+      if (cycleTimer !== null) {
+        stopCycle();
+        setForced(null);
+        return;
+      }
+      cycleBtn.classList.add("on");
+      let i = 0;
+      setForced(DEV_STATES[i]);
+      cycleTimer = window.setInterval(() => {
+        i = (i + 1) % DEV_STATES.length;
+        setForced(DEV_STATES[i]);
+      }, 1200);
+    });
+
+    panel.appendChild(select);
+    panel.appendChild(cycleBtn);
+    document.body.appendChild(panel);
+  }
 });

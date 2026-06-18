@@ -54,47 +54,9 @@ body {
   pointer-events: none;
 }
 
-/* Sprites are static art (no scaling); the working state animates via frame
-   cycling in JS. Onfire keeps a glow — that's a filter, not a scale. */
-.state-onfire .sprite {
-  filter: drop-shadow(0 0 12px rgba(255, 90, 0, 0.95));
-}
-
-/* Approaching-limit warnings: an escalating glow so the warning reads even
-   before dedicated sprites exist (the art falls back to the idle pose). Yellow
-   (10%) → orange (5%) → pulsing red (1%, the "almost out" alarm). */
-.state-approaching10 .sprite {
-  filter: drop-shadow(0 0 10px rgba(255, 215, 0, 0.9));
-}
-.state-approaching5 .sprite {
-  filter: drop-shadow(0 0 12px rgba(255, 140, 0, 0.95));
-}
-.state-approaching1 .sprite {
-  filter: drop-shadow(0 0 14px rgba(255, 30, 0, 1));
-  animation: approaching-pulse 1s ease-in-out infinite;
-}
-@keyframes approaching-pulse {
-  50% {
-    filter: drop-shadow(0 0 22px rgba(255, 30, 0, 1));
-  }
-}
-
-/* At limit: solid, urgent red with a faster pulse. */
-.state-atlimit .sprite {
-  filter: drop-shadow(0 0 16px rgba(255, 0, 0, 1));
-  animation: approaching-pulse 0.7s ease-in-out infinite;
-}
-/* Quota refreshed: fresh green. Error: amber/red concern. Long-running: a
-   calm teal marathon glow. (All placeholders until dedicated art lands.) */
-.state-refreshed .sprite {
-  filter: drop-shadow(0 0 12px rgba(60, 220, 90, 0.95));
-}
-.state-error .sprite {
-  filter: drop-shadow(0 0 12px rgba(255, 120, 30, 0.95));
-}
-.state-longrun .sprite {
-  filter: drop-shadow(0 0 10px rgba(40, 200, 200, 0.8));
-}
+/* Per-state colored glow auras were removed — states are distinguished by their
+   sprites alone (falling back to the idle pose until dedicated art lands). The
+   only sprite filter is the neutral depth shadow on `.sprite` above. */
 
 /* Sprite + hat are stacked so the hat overlays the head. Stays click-through
    (like its children) so the whole #pet remains the drag handle. */
@@ -111,4 +73,29 @@ body {
   height: 100%;
   object-fit: contain;
   pointer-events: none;
+}
+
+/* Dev-only state picker — injected by main.ts only in `tauri dev` (never in a
+   release build). Lets you force any pose in-window instead of via the tray.
+   pointer-events:auto so it's clickable; the rat stays the drag handle. */
+#dev-panel {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 2px;
+  display: flex;
+  gap: 4px;
+  justify-content: center;
+  align-items: center;
+  pointer-events: auto;
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+}
+#dev-panel select,
+#dev-panel button {
+  font-size: 10px;
+  pointer-events: auto;
+}
+#dev-panel button.on {
+  background: #33dd66;
 }
