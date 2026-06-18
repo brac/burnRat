@@ -32,9 +32,34 @@ for (const a of args) {
     paths.push(a);
   }
 }
-const TARGET_PX = Number(flags.get("max") ?? 300); // longest side, px
-const BUDGET_KB = Number(flags.get("budget") ?? 100); // per-file size ceiling
-const DRY_RUN = Boolean(flags.get("dry-run"));
+// A numeric flag must be given a value (`--max=300`, not a bare `--max`) and
+// parse to a positive number — otherwise a bare flag becomes boolean `true`,
+// `Number(true)` is 1, and the tool would silently resize every PNG to 1x1 and
+// overwrite it in place. Fail loudly instead.
+function numFlag(name, def) {
+  const raw = flags.get(name);
+  if (raw === undefined) return def;
+  if (raw === true) {
+    console.error(`--${name} needs a value, e.g. --${name}=${def}`);
+    process.exit(1);
+  }
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) {
+    console.error(`--${name} must be a positive number (got "${raw}")`);
+    process.exit(1);
+  }
+  return n;
+}
+// A boolean flag is true when bare (`--dry-run`) or `=true/1`, false at `=false/0`.
+function boolFlag(name) {
+  const raw = flags.get(name);
+  if (raw === undefined) return false;
+  if (raw === false || raw === "false" || raw === "0") return false;
+  return true;
+}
+const TARGET_PX = numFlag("max", 300); // longest side, px
+const BUDGET_KB = numFlag("budget", 100); // per-file size ceiling
+const DRY_RUN = boolFlag("dry-run");
 const ROOTS = paths.length ? paths : ["characters", "src/hats"];
 const BUDGET_BYTES = BUDGET_KB * 1024;
 

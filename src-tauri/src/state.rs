@@ -59,6 +59,10 @@ pub struct StateMachine {
     /// While set and in the future, the rat is crashing (spent).
     spent_until: Option<DateTime<Utc>>,
     last_instant: f64,
+    /// Whether the previous tick resolved to `Sleeping`. The `flinch` startle
+    /// only fires on the *wake* tick (asleep → active), not on every spike, so
+    /// the rat doesn't keep startling as the burn ramps working → onfire.
+    was_sleeping: bool,
 }
 
 impl StateMachine {
@@ -70,11 +74,14 @@ impl StateMachine {
             last_onfire: None,
             spent_until: None,
             last_instant: 0.0,
+            // Start "asleep" so a launch straight into an active burst startles
+            // once (the rat waking up), but not repeatedly thereafter.
+            was_sleeping: true,
         }
     }
 
     /// Advance one tick. Returns the base pose plus an optional transient
-    /// `"flinch"` event (a single-frame spike bounce) for the event resolver.
+    /// `"flinch"` event (a single-frame startle bounce) for the event resolver.
     #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
@@ -87,15 +94,50 @@ impl StateMachine {
         instant_tpm: f64,
         now: DateTime<Utc>,
     ) -> (BaseState, Option<&'static str>) {
-        let event = self.detect_spike(instant_tpm);
+        let spike = self.detect_spike(instant_tpm);
+        let base = self.resolve_base(
+            is_active,
+            done,
+            asking,
+            sent,
+            recent_activity,
+            smoothed_tpm,
+            now,
+        );
 
+        // Startle only on waking: a rate spike on the first active tick after the
+        // rat was asleep. Spikes while it's already awake are just the burn
+        // ramping (working → frantic → onfire), so they don't re-trigger it.
+        let event = if spike && self.was_sleeping && base != BaseState::Sleeping {
+            Some("flinch")
+        } else {
+            None
+        };
+        self.was_sleeping = base == BaseState::Sleeping;
+
+        (base, event)
+    }
+
+    /// Resolve just the Layer-1 base pose (no event). Split out so `update` can
+    /// decide the wake-startle from the resulting pose.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_base(
+        &mut self,
+        is_active: bool,
+        done: bool,
+        asking: bool,
+        sent: bool,
+        recent_activity: bool,
+        smoothed_tpm: f64,
+        now: DateTime<Utc>,
+    ) -> BaseState {
         // No active billing window → the rat sleeps; reset everything.
         if !is_active {
             self.level = CALM;
             self.onfire_since = None;
             self.last_onfire = None;
             self.spent_until = None;
-            return (BaseState::Sleeping, event);
+            return BaseState::Sleeping;
         }
 
         // Awaiting the user takes precedence over the rate-driven states (and
@@ -105,7 +147,7 @@ impl StateMachine {
             self.level = CALM;
             self.onfire_since = None;
             self.spent_until = None;
-            return (BaseState::Done, event);
+            return BaseState::Done;
         }
 
         // A fresh user message (awaiting Claude, no tokens flowing yet) → the
@@ -115,7 +157,7 @@ impl StateMachine {
             self.level = CALM;
             self.onfire_since = None;
             self.spent_until = None;
-            return (BaseState::Thinking, event);
+            return BaseState::Thinking;
         }
 
         self.advance_level(smoothed_tpm);
@@ -138,7 +180,7 @@ impl StateMachine {
             self.last_onfire = Some(now);
         }
 
-        (self.apply_spent(base, smoothed_tpm, now), event)
+        self.apply_spent(base, smoothed_tpm, now)
     }
 
     /// The post-onfire crash: collapse to spent, hold, then relax to thinking.
@@ -194,14 +236,13 @@ impl StateMachine {
         }
     }
 
-    fn detect_spike(&mut self, instant_tpm: f64) -> Option<&'static str> {
+    /// Whether the instant rate jumped by at least the spike threshold this tick.
+    /// Always advances `last_instant`; the caller decides whether the spike
+    /// actually startles (only on waking — see `update`).
+    fn detect_spike(&mut self, instant_tpm: f64) -> bool {
         let jump = instant_tpm - self.last_instant;
         self.last_instant = instant_tpm;
-        if jump >= self.thresholds.spike.instant_tpm_flinch {
-            Some("flinch")
-        } else {
-            None
-        }
+        jump >= self.thresholds.spike.instant_tpm_flinch
     }
 }
 
@@ -336,9 +377,40 @@ mod tests {
     }
 
     #[test]
-    fn spike_emits_flinch() {
+    fn spike_emits_flinch_on_wake() {
+        // A fresh machine starts "asleep", so the first active tick with a spike
+        // startles (the rat waking up).
         let mut m = StateMachine::new(thresholds());
         let (_, e) = m.update(true, false, false, false, false, 0.0, 90_000.0, t0());
+        assert_eq!(e, Some("flinch"));
+    }
+
+    #[test]
+    fn no_flinch_while_already_awake() {
+        // Wake with a spike (startles), then a second, even bigger spike while
+        // already active must NOT re-startle — that was the "startle bug" where
+        // the rat flinched repeatedly as the burn ramped.
+        let mut m = StateMachine::new(thresholds());
+        let t = t0();
+        let (_, e1) = m.update(true, false, false, false, false, 0.0, 90_000.0, t);
+        assert_eq!(e1, Some("flinch"));
+        let (_, e2) = m.update(true, false, false, false, false, 5_000.0, 300_000.0, t);
+        assert_eq!(e2, None);
+    }
+
+    #[test]
+    fn flinch_again_after_sleeping() {
+        // Once the rat sleeps and wakes again, a spike startles anew.
+        let mut m = StateMachine::new(thresholds());
+        let t = t0();
+        // Wake + startle, then ride the burn (no further flinches).
+        m.update(true, false, false, false, false, 0.0, 90_000.0, t);
+        m.update(true, false, false, false, false, 5_000.0, 90_000.0, t);
+        // Go to sleep (inactive).
+        let (b, _) = m.update(false, false, false, false, false, 0.0, 0.0, t);
+        assert_eq!(b, BaseState::Sleeping);
+        // Wake again with a burst → startles again.
+        let (_, e) = m.update(true, false, false, false, true, 0.0, 90_000.0, t);
         assert_eq!(e, Some("flinch"));
     }
 

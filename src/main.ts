@@ -130,13 +130,19 @@ window.addEventListener("DOMContentLoaded", () => {
   const hat = document.querySelector<HTMLImageElement>("#hat");
   const readout = document.querySelector<HTMLElement>("#readout");
 
+  // Set once character loading has ultimately failed (after retries); the
+  // readout surfaces it so the pet isn't just silently blank forever.
+  let charError = false;
   // Fetch the active character from the backend and rebuild the frame table.
   // Called once on startup and again whenever the tray "Character" submenu fires
-  // a "character-changed" event — a live swap with no window rebuild.
-  async function reloadCharacter() {
+  // a "character-changed" event — a live swap with no window rebuild. Retries a
+  // few times on failure (covers a transient startup race) before giving up.
+  async function reloadCharacter(attempt = 0): Promise<void> {
     try {
       const c = await invoke<ResolvedCharacter | null>("active_character");
-      if (!c) return;
+      if (!c || Object.keys(c.assets).length === 0) {
+        throw new Error("no active character resolved");
+      }
       const next: Record<string, string[]> = {};
       for (const [name, asset] of Object.entries(c.assets)) {
         next[name] = asset.urls;
@@ -170,8 +176,15 @@ window.addEventListener("DOMContentLoaded", () => {
         const img = new Image();
         img.src = url;
       }
+      charError = false; // a previous failure (if any) has recovered
     } catch (e) {
       console.error("burnRat: failed to load character", e);
+      // Retry a few times, then surface the failure rather than staying blank.
+      if (attempt < 5) {
+        setTimeout(() => void reloadCharacter(attempt + 1), 1000);
+      } else {
+        charError = true;
+      }
     }
   }
   void reloadCharacter();
@@ -211,7 +224,11 @@ window.addEventListener("DOMContentLoaded", () => {
   function easeReadout() {
     if (readout) {
       let text = "";
-      if (quotaPct >= 1.0) {
+      if (charError) {
+        // Character art never loaded (after retries) — the sprite is blank, so
+        // say so instead of leaving a silent empty pet.
+        text = "⚠ no art";
+      } else if (quotaPct >= 1.0) {
         // At/over the quota ceiling: show the countdown to the window refresh.
         text = `${formatCountdown(countdownMin)} ⏳`;
       } else if (nearLimit > 0) {

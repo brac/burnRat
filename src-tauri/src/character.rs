@@ -262,18 +262,24 @@ fn validate(manifest: &CharacterManifest, base_dir: &Path) -> Result<(), String>
 fn check_files(base_dir: &Path, entry: &AssetEntry) -> Result<(), String> {
     if let Some(frames) = entry.explicit_frames() {
         for f in frames {
-            if !base_dir.join(f).exists() {
-                return Err(format!("frame '{f}' not found in {}", base_dir.display()));
-            }
+            check_readable(&base_dir.join(f))?;
         }
-    } else if !base_dir.join(&entry.asset).exists() {
-        return Err(format!(
-            "asset '{}' not found in {}",
-            entry.asset,
-            base_dir.display()
-        ));
+    } else {
+        check_readable(&base_dir.join(&entry.asset))?;
     }
     Ok(())
+}
+
+/// A required asset must exist, be a regular file, and be non-empty. `.exists()`
+/// alone would pass a 0-byte or unreadable file, which then resolves to a blank
+/// or broken `data:` URL — a character that looks valid but renders nothing.
+fn check_readable(path: &Path) -> Result<(), String> {
+    match std::fs::metadata(path) {
+        Ok(m) if !m.is_file() => Err(format!("'{}' is not a file", path.display())),
+        Ok(m) if m.len() == 0 => Err(format!("'{}' is empty (0 bytes)", path.display())),
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("'{}' unreadable: {e}", path.display())),
+    }
 }
 
 /// Scan one characters dir: load every subfolder that holds a `character.json`,
@@ -424,6 +430,18 @@ mod tests {
     fn missing_asset_is_excluded() {
         let dir = make_character("missing-asset", "sprite", Some("onfire.png"));
         assert!(load_one(&dir).is_err());
+    }
+
+    #[test]
+    fn zero_byte_required_asset_is_excluded() {
+        // A 0-byte file exists but would render blank — validation must reject it.
+        let dir = make_character("zerobyte", "sprite", None);
+        std::fs::write(dir.join("onfire.png"), b"").unwrap();
+        let err = load_one(&dir).unwrap_err();
+        assert!(
+            err.contains("onfire") && err.contains("empty"),
+            "got: {err}"
+        );
     }
 
     #[test]
