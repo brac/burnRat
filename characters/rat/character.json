@@ -1,0 +1,29 @@
+{
+  "id": "rat",
+  "name": "Rat",
+  "renderer": "sprite",
+  "canvas": { "width": 300, "height": 300 },
+  "anchor": { "x": 0.5, "y": 0.5 },
+
+  "$frames": "When present, `frames` is the full ordered ping-pong loop (the renderer cycles 0->n-1->0); `asset` is the single static/representative image used when `frames` is absent. Adding frames is optional polish and never inflates the required set.",
+
+  "states": {
+    "sleeping": { "asset": "sleeping.png", "frames": ["sleeping.png", "sleeping_1.png"] },
+    "thinking": { "asset": "thinking.png" },
+    "working":  { "asset": "working.png", "frames": ["working.png", "working_1.png", "working_2.png"] },
+    "frantic":  { "asset": "frantic.png", "frames": ["frantic.png", "frantic_1.png", "frantic_2.png"] },
+    "onfire":   { "asset": "onfire.png", "frames": ["onfire.png", "onfire_1.png"] },
+    "spent":    { "asset": "spent.png" },
+    "done":     { "asset": "done.png" }
+  },
+
+  "modifiers": {
+    "quotaProximity": { "asset": "nearlimit.png" }
+  },
+
+  "events": {
+    "refreshed": { "asset": "refreshed.png" },
+    "error":     { "asset": "error.png" },
+    "flinch":    { "asset": "surprised.png" }
+  }
+}
