@@ -410,6 +410,56 @@ fn character_dirs(app: &tauri::AppHandle) -> Vec<std::path::PathBuf> {
     dirs
 }
 
+/// Dev-only: watch the characters dirs and re-emit "character-changed" when art
+/// changes, so edits show up in the window within a moment — no restart, no
+/// tray-switch. Compiled to a no-op in release builds, where art ships read-only
+/// inside the bundle and live editing isn't expected.
+fn spawn_character_watcher(
+    app: tauri::AppHandle,
+    dirs: Vec<std::path::PathBuf>,
+    shared: Arc<Shared>,
+) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    std::thread::spawn(move || {
+        use notify::{RecursiveMode, Watcher};
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut watcher = match notify::recommended_watcher(move |res| {
+            let _ = tx.send(res);
+        }) {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("burnRat: character hot-reload watcher unavailable: {e}");
+                return;
+            }
+        };
+        // Watch whichever dirs exist (the bundled/user dirs may be absent in dev).
+        let watching = dirs
+            .iter()
+            .filter(|d| watcher.watch(d, RecursiveMode::Recursive).is_ok())
+            .count();
+        if watching == 0 {
+            return;
+        }
+        loop {
+            // Block until something changes, then settle briefly to coalesce the
+            // burst of events a single save emits, and re-emit once.
+            if rx.recv().is_err() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            while rx.try_recv().is_ok() {}
+            let id = shared
+                .user
+                .lock()
+                .map(|u| u.character.clone())
+                .unwrap_or_default();
+            let _ = app.emit("character-changed", &id);
+        }
+    });
+}
+
 /// Build the tray icon and its menu (move mode, opacity, character, quit).
 fn build_tray(app: &tauri::App, shared: Arc<Shared>) -> tauri::Result<()> {
     let toggle = MenuItem::with_id(
@@ -545,7 +595,8 @@ pub fn run() {
             // Discover characters before the tray (it builds the Character
             // submenu from this list). If the saved character no longer exists,
             // fall back to the first valid one so the tray check + emits agree.
-            let characters = character::discover(&character_dirs(app.handle()));
+            let char_dirs = character_dirs(app.handle());
+            let characters = character::discover(&char_dirs);
             if characters.is_empty() {
                 eprintln!("burnRat: no valid characters found — the rat will not render");
             } else if !characters.iter().any(|c| c.manifest.id == user.character) {
@@ -592,6 +643,10 @@ pub fn run() {
                     eprintln!("burnRat: failed to register move-mode shortcut: {e}");
                 }
             }
+
+            // Dev-only: hot-reload art when the characters dirs change (no-op in
+            // release). Clone shared before the poll loop takes ownership.
+            spawn_character_watcher(app.handle().clone(), char_dirs, shared.clone());
 
             spawn_poll_loop(app.handle().clone(), shared);
 

@@ -35,9 +35,10 @@ will look wrong overlaid; this is the most important one to make skull-native.
 
 ## Optional polish
 
-- Per-pose ping-pong frames: add `sleeping_1.png`, `working_1.png`,
-  `working_2.png`, etc. and declare them in `character.json` under that entry's
-  `frames: [...]`. 1 frame = static, 2 = alternate, 3+ = smooth back-and-forth.
+- Per-pose ping-pong frames: just drop `sleeping_1.png`, `working_1.png`,
+  `working_2.png`, etc. next to the base pose — they auto-discover into that
+  pose's loop in index order (1 = static, 2 = alternate, 3+ = smooth). No
+  manifest edit needed (an explicit `frames: [...]` on an entry overrides it).
 - A distinct `thinking` pose (the rat reuses idle here).
 
 ## Sizing (same as the rat)

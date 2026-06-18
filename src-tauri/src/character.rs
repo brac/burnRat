@@ -60,14 +60,54 @@ pub struct AssetEntry {
 }
 
 impl AssetEntry {
-    /// The ordered files for this entry: the explicit `frames` loop if present,
-    /// otherwise just the single `asset`.
-    fn files(&self) -> Vec<&str> {
+    /// Explicitly-declared frames, if the manifest lists a non-empty `frames`.
+    /// `None` means "auto-discover from the folder" (the drop-in convention).
+    fn explicit_frames(&self) -> Option<Vec<&str>> {
         match &self.frames {
-            Some(f) if !f.is_empty() => f.iter().map(String::as_str).collect(),
-            _ => vec![self.asset.as_str()],
+            Some(f) if !f.is_empty() => Some(f.iter().map(String::as_str).collect()),
+            _ => None,
         }
     }
+}
+
+/// The ordered frame files for an entry. An explicit `frames` list wins;
+/// otherwise the folder is scanned for `<stem>.png`, `<stem>_1.png`,
+/// `<stem>_2.png`, … (sorted by index) — the classic drop-in convention, so
+/// adding or removing a frame file Just Works with no manifest edit. Falls back
+/// to the declared `asset` if the scan turns up nothing (e.g. unreadable dir).
+fn frame_files(base_dir: &Path, entry: &AssetEntry) -> Vec<String> {
+    if let Some(frames) = entry.explicit_frames() {
+        return frames.into_iter().map(str::to_string).collect();
+    }
+    let stem = entry.asset.strip_suffix(".png").unwrap_or(&entry.asset);
+    let mut found: Vec<(u32, String)> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(base_dir) {
+        for e in rd.flatten() {
+            if let Some(name) = e.file_name().to_str() {
+                if let Some(idx) = frame_index(stem, name) {
+                    found.push((idx, name.to_string()));
+                }
+            }
+        }
+    }
+    found.sort_by_key(|(i, _)| *i);
+    let out: Vec<String> = found.into_iter().map(|(_, n)| n).collect();
+    if out.is_empty() {
+        vec![entry.asset.clone()]
+    } else {
+        out
+    }
+}
+
+/// Frame index for a filename against a base stem: `<stem>.png` → 0,
+/// `<stem>_<digits>.png` → the digits, anything else → None. The `_` separator
+/// keeps `working` from matching `workingother`.
+fn frame_index(stem: &str, name: &str) -> Option<u32> {
+    let rest = name.strip_suffix(".png")?;
+    if rest == stem {
+        return Some(0);
+    }
+    rest.strip_prefix(stem)?.strip_prefix('_')?.parse().ok()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -134,8 +174,7 @@ impl LoadedCharacter {
         ];
         for group in groups {
             for (name, entry) in group {
-                let urls: Vec<String> = entry
-                    .files()
+                let urls: Vec<String> = frame_files(&self.base_dir, entry)
                     .iter()
                     .filter_map(|f| self.encode(f))
                     .collect();
@@ -215,12 +254,22 @@ fn validate(manifest: &CharacterManifest, base_dir: &Path) -> Result<(), String>
     Ok(())
 }
 
-/// Every file an entry references (its `asset` and any `frames`) must exist.
+/// Validate an entry's files exist. With explicit `frames`, every listed file
+/// must be present. Without them only the representative `asset` is required —
+/// auto-discovered extra frames are optional polish.
 fn check_files(base_dir: &Path, entry: &AssetEntry) -> Result<(), String> {
-    for f in entry.files() {
-        if !base_dir.join(f).exists() {
-            return Err(format!("asset '{f}' not found in {}", base_dir.display()));
+    if let Some(frames) = entry.explicit_frames() {
+        for f in frames {
+            if !base_dir.join(f).exists() {
+                return Err(format!("frame '{f}' not found in {}", base_dir.display()));
+            }
         }
+    } else if !base_dir.join(&entry.asset).exists() {
+        return Err(format!(
+            "asset '{}' not found in {}",
+            entry.asset,
+            base_dir.display()
+        ));
     }
     Ok(())
 }
@@ -344,6 +393,29 @@ mod tests {
         assert_eq!(resolved.assets.len(), 11);
         // Each asset is a base64 data URL.
         assert!(resolved.assets["sleeping"].urls[0].starts_with("data:image/png;base64,"));
+    }
+
+    #[test]
+    fn auto_discovers_frames_from_folder_when_manifest_omits_them() {
+        // make_character writes single-frame `asset` entries with no `frames`.
+        let dir = make_character("autoframes", "sprite", None);
+        // Drop two extra working frames in — the manifest does NOT mention them.
+        std::fs::write(dir.join("working_1.png"), b"PNG").unwrap();
+        std::fs::write(dir.join("working_2.png"), b"PNG").unwrap();
+        let resolved = load_one(&dir).expect("should load").resolve();
+        // working auto-discovers working.png + _1 + _2, in index order.
+        assert_eq!(resolved.assets["working"].urls.len(), 3);
+        // A pose with no extra frames stays a single frame.
+        assert_eq!(resolved.assets["done"].urls.len(), 1);
+    }
+
+    #[test]
+    fn frame_index_matches_only_proper_frames() {
+        assert_eq!(frame_index("working", "working.png"), Some(0));
+        assert_eq!(frame_index("working", "working_2.png"), Some(2));
+        assert_eq!(frame_index("working", "workingother.png"), None);
+        assert_eq!(frame_index("working", "work.png"), None);
+        assert_eq!(frame_index("working", "working_.png"), None);
     }
 
     #[test]

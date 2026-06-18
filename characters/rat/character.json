@@ -5,14 +5,14 @@
   "canvas": { "width": 300, "height": 300 },
   "anchor": { "x": 0.5, "y": 0.5 },
 
-  "$frames": "When present, `frames` is the full ordered ping-pong loop (the renderer cycles 0->n-1->0); `asset` is the single static/representative image used when `frames` is absent. Adding frames is optional polish and never inflates the required set.",
+  "$frames": "Frames auto-discover from the folder: `asset` is the base pose, and any `<stem>_1.png`, `<stem>_2.png`, … sitting next to it join that pose's ping-pong loop in index order (1 frame = static, 2 = alternate, 3+ = smooth). Just drop frame files in or remove them — no manifest edit needed. To pin an exact, non-conventional set instead, add an explicit `frames: [...]` to that entry (it overrides discovery, and every listed file must then exist).",
 
   "states": {
-    "sleeping": { "asset": "sleeping.png", "frames": ["sleeping.png", "sleeping_1.png"] },
+    "sleeping": { "asset": "sleeping.png" },
     "thinking": { "asset": "thinking.png" },
-    "working":  { "asset": "working.png", "frames": ["working.png", "working_1.png", "working_2.png"] },
-    "frantic":  { "asset": "frantic.png", "frames": ["frantic.png", "frantic_1.png", "frantic_2.png"] },
-    "onfire":   { "asset": "onfire.png", "frames": ["onfire.png", "onfire_1.png"] },
+    "working":  { "asset": "working.png" },
+    "frantic":  { "asset": "frantic.png" },
+    "onfire":   { "asset": "onfire.png" },
     "spent":    { "asset": "spent.png" },
     "done":     { "asset": "done.png" }
   },
