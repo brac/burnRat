@@ -24,20 +24,21 @@ Rust poll loop (1s)                          Frontend (event listener)
 | `src-tauri/src/blocks.rs` | 5-hour billing-window grouping (ccusage-equivalent); active block, consumed, projected |
 | `src-tauri/src/rate.rs` | Rolling smoothed + instant tokens/min from a monotonic work-token counter; `UnitSelector` picks the readout unit (tok/sec ↔ tok/min) with hysteresis. **Unit-tested.** |
 | `src-tauri/src/state.rs` | Creature state machine (hysteresis, onfire sustain, post-onfire `spent` crash). **Unit-tested.** |
+| `src-tauri/src/character.rs` | Runtime character loader: discover `characters/<id>/` folders (dev repo + bundled resources + user drop-in), validate against the fixed contract, resolve the active one to base64 data-URL assets for the `active_character` command. **Unit-tested.** |
 | `src-tauri/src/config.rs` | Loads `data/*.json` (embedded defaults + live dev override) |
-| `src-tauri/src/userconfig.rs` | Persists user overrides (opacity) to the OS app-config dir |
-| `src/main.ts` | Listens for `game-state`; sprite/animation; working frame loop; surprised pop; eased + auto-scaling rate readout (`requestAnimationFrame` glide over the chunky per-turn signal) |
-| `src/styles.css` | Per-state styling; sprites are images animated via JS frame swaps |
+| `src-tauri/src/userconfig.rs` | Persists user overrides (opacity, selected character) to the OS app-config dir |
+| `src/main.ts` | Listens for `game-state`; on startup (and `character-changed`) `invoke("active_character")` to load the active character's data-URL frames; base-pose ping-pong loop; one-shot event player; near-limit overlay; eased + auto-scaling rate readout (`requestAnimationFrame` glide over the chunky per-turn signal) |
+| `src/styles.css` | Per-state styling; sprites/overlay/hat are stacked images animated via JS frame swaps |
 | `data/` | All tunable magic numbers — **no logic depends on hardcoded numbers elsewhere** |
-| `src/sprites/` | Per-state PNGs, auto-discovered by filename: `<state>.png` + optional `<state>_1.png`, `<state>_2.png`, … grouped into that state's loop via `import.meta.glob` in `main.ts` |
+| `characters/<id>/` | A character = a folder of ~10 PNGs + a `character.json` manifest, discovered at **runtime** by `character.rs`. Filenames are the contract (`sleeping.png`, `working.png`, `nearlimit.png`, …); extra ping-pong frames are declared per-entry in the manifest. The `rat` is the reference character. |
 
 ## Conventions
 
 - **Tunables go in `data/`**, never hardcoded in logic. `config.rs` embeds the defaults via `include_str!` *and* re-reads the live files from the repo `data/` dir in dev (resolved via `CARGO_MANIFEST_DIR`), so thresholds can be tuned without a rebuild.
 - **The burn signal mixes work + cache**, weighted by `rateCacheWeight` (default `1.0` = full cache; `0.0` = work-only). Cache tokens run ~70× larger than work, so the state thresholds in `data/thresholds.json` are calibrated for the cache-inclusive scale — **change the weight and you must retune the thresholds together** (the `$comment` there gives the work-only divisor). `consumed` (work) and `consumedWithCache` are still reported separately for the readout/limit math.
-- Art is auto-discovered from `src/sprites/` by filename convention (`main.ts`); add frames by dropping files in, no code changes. `STATE_BASE` in `main.ts` maps a state to a differently-named base (e.g. `calm` → `idle`). Per-model **hats** work the same way from `src/hats/` (filename = model family).
+- **Characters are runtime-loaded folders**, not a build-time glob. `character.rs` discovers `characters/<id>/`, validates the contract (7 base states `sleeping/thinking/working/frantic/onfire/spent/done` + the `quotaProximity` modifier + `refreshed`/`error` events), and resolves the active one to data-URL assets; the frontend maps `base_state`/`event` → asset by name. Add/replace art by dropping a PNG in over the contract filename — **zero code changes**. Per-model **hats** are still a build-time glob from `src/hats/` (filename = model family), shared across characters.
 - **Sprite sizing:** the rat renders at **150×150 CSS px**, so source PNGs should be **300×300** (2× for HiDPI) and optimized to **well under ~100 KB** each. The current art is multi-MB full-res exports — far oversized (TODO: downscale/compress; this bloats the bundle and memory).
-- States `refreshed`/`atlimit`/`error`/`longrun`/`approaching10|5|1` have no dedicated sprites yet — they fall back to the idle pose and are distinguished by CSS glows in `styles.css` until art is added.
+- The `rat`'s `nearlimit.png`/`refreshed.png`/`error.png` are still **placeholders** reusing other poses (see `characters/rat/ART_NEEDS.md`) — `nearlimit` especially must become an *overlay* accent, not a full second rat. They render today (engine is wired); only the art is pending.
 - Frontend has no business logic. If you're tempted to add a threshold or rule in TS, it belongs in Rust + `data/`. (The exception is pure *animation/presentation* timing — e.g. `FRAME_MS`, `RATE_EASE_ALPHA` — which lives in `main.ts` as view constants. The readout's *unit* choice is a rule, so it's decided in Rust; the *glide* is presentation, so it's eased in TS.)
 
 ## Build / test / run

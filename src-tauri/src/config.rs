@@ -32,6 +32,9 @@ pub struct Settings {
     pub block_window_hours: i64,
     pub plan: String,
     pub opacity: f64,
+    /// Active character id (a folder under `characters/`). The default; the
+    /// user's live choice is persisted in `UserConfig`.
+    pub character: String,
     pub click_through: bool,
     pub display: DisplayCfg,
     /// Optional manual tokens-per-window cap (input+output+cache) keyed by plan
@@ -61,9 +64,10 @@ pub struct DisplayCfg {
 impl Settings {
     /// Poll interval clamped to the configured min/max.
     pub fn poll_interval(&self) -> std::time::Duration {
-        let secs = self
-            .poll_interval_seconds
-            .clamp(self.poll_interval_min_seconds, self.poll_interval_max_seconds);
+        let secs = self.poll_interval_seconds.clamp(
+            self.poll_interval_min_seconds,
+            self.poll_interval_max_seconds,
+        );
         std::time::Duration::from_secs(secs)
     }
 
@@ -163,10 +167,8 @@ pub struct Config {
 
 impl Config {
     pub fn load() -> Self {
-        let settings: Settings =
-            parse_with_override("settings.default.json", DEFAULT_SETTINGS);
-        let thresholds: Thresholds =
-            parse_with_override("thresholds.json", DEFAULT_THRESHOLDS);
+        let settings: Settings = parse_with_override("settings.default.json", DEFAULT_SETTINGS);
+        let thresholds: Thresholds = parse_with_override("thresholds.json", DEFAULT_THRESHOLDS);
         Config {
             settings,
             thresholds,
@@ -176,7 +178,9 @@ impl Config {
 
 /// Path to the repo's `data/` dir as known at compile time (dev only).
 fn dev_data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("data")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("data")
 }
 
 /// Parse the live file from `data/` if present, otherwise the embedded default.

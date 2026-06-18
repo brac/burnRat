@@ -1,4 +1,5 @@
 mod blocks;
+mod character;
 mod config;
 mod data;
 mod events;
@@ -34,6 +35,9 @@ struct Shared {
     config_path: std::path::PathBuf,
     /// The persisted user overrides.
     user: Mutex<UserConfig>,
+    /// Valid characters discovered at startup (immutable after setup). The
+    /// selected id lives in `user.character`.
+    characters: Vec<character::LoadedCharacter>,
 }
 
 impl Shared {
@@ -71,8 +75,9 @@ struct GameState {
     rate_unit: &'static str,
     /// Model family driving the rat's hat ("opus"/"sonnet"/"haiku"/…/"none").
     model: &'static str,
-    /// Active character id (lets the view guard swaps). Single character for now.
-    character: &'static str,
+    /// Active character id (lets the view guard swaps / ignore a stale tick from
+    /// before a character change).
+    character: String,
 }
 
 /// Collapse a model id (e.g. "claude-opus-4-8") to a family the frontend maps
@@ -101,9 +106,11 @@ fn ensure_on_primary_monitor(app: &tauri::AppHandle) {
     let Some(win) = app.get_webview_window("main") else {
         return;
     };
-    let (Ok(Some(primary)), Ok(pos), Ok(size)) =
-        (win.primary_monitor(), win.outer_position(), win.outer_size())
-    else {
+    let (Ok(Some(primary)), Ok(pos), Ok(size)) = (
+        win.primary_monitor(),
+        win.outer_position(),
+        win.outer_size(),
+    ) else {
         return;
     };
 
@@ -319,8 +326,16 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
             };
 
             // Layer 1 — base pose (+ a transient flinch for Layer 3).
-            let (base, flinch) =
-                machine.update(awake, done, asking, sent, recent_activity, smoothed, instant, now);
+            let (base, flinch) = machine.update(
+                awake,
+                done,
+                asking,
+                sent,
+                recent_activity,
+                smoothed,
+                instant,
+                now,
+            );
 
             // Layer 3 — resolve the single event to play this tick (priority +
             // debounce): API error, quota-refresh edge, or rate-spike flinch.
@@ -328,6 +343,14 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
 
             let rate_unit = unit_selector.select(smoothed).as_str();
             let model = model_family(monitor.current_model());
+            // The active character id can change live (tray submenu); read it
+            // each tick so the emitted state stays in sync with what the view
+            // resolved on the matching "character-changed" event.
+            let character = shared
+                .user
+                .lock()
+                .map(|u| u.character.clone())
+                .unwrap_or_default();
 
             let game = GameState {
                 smoothed_tpm: smoothed,
@@ -344,7 +367,7 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
                 event,
                 rate_unit,
                 model,
-                character: "rat",
+                character,
             };
 
             let _ = app.emit("game-state", &game);
@@ -361,9 +384,41 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
     });
 }
 
-/// Build the tray icon and its menu (move mode, opacity, quit).
+/// Resolve the currently-selected character to frontend-ready data-URL assets.
+/// Falls back to the first valid character if the selected id is unknown (e.g.
+/// the user's saved character folder was removed). Returns `None` only when no
+/// valid character exists at all.
+#[tauri::command]
+fn active_character(shared: tauri::State<'_, Arc<Shared>>) -> Option<character::ResolvedCharacter> {
+    let selected = shared.user.lock().ok().map(|u| u.character.clone());
+    let chosen = selected
+        .and_then(|id| shared.characters.iter().find(|c| c.manifest.id == id))
+        .or_else(|| shared.characters.first())?;
+    Some(chosen.resolve())
+}
+
+/// Gather the characters dirs to scan, in override order (dev repo, then bundled
+/// resources, then the user drop-in dir). Missing dirs are scanned harmlessly.
+fn character_dirs(app: &tauri::AppHandle) -> Vec<std::path::PathBuf> {
+    let mut dirs = vec![character::dev_characters_dir()];
+    if let Ok(res) = app.path().resource_dir() {
+        dirs.push(res.join("characters"));
+    }
+    if let Ok(data) = app.path().app_data_dir() {
+        dirs.push(data.join("characters"));
+    }
+    dirs
+}
+
+/// Build the tray icon and its menu (move mode, opacity, character, quit).
 fn build_tray(app: &tauri::App, shared: Arc<Shared>) -> tauri::Result<()> {
-    let toggle = MenuItem::with_id(app, "toggle", "Pass-Through  (Ctrl+Shift+M)", true, None::<&str>)?;
+    let toggle = MenuItem::with_id(
+        app,
+        "toggle",
+        "Pass-Through  (Ctrl+Shift+M)",
+        true,
+        None::<&str>,
+    )?;
 
     // Opacity submenu — fixed steps.
     let current_pct = shared.opacity_pct.load(Ordering::Relaxed);
@@ -379,12 +434,40 @@ fn build_tray(app: &tauri::App, shared: Arc<Shared>) -> tauri::Result<()> {
             None::<&str>,
         )?);
     }
-    let op_refs: Vec<&dyn tauri::menu::IsMenuItem<_>> =
-        op_items.iter().map(|i| i as &dyn tauri::menu::IsMenuItem<_>).collect();
+    let op_refs: Vec<&dyn tauri::menu::IsMenuItem<_>> = op_items
+        .iter()
+        .map(|i| i as &dyn tauri::menu::IsMenuItem<_>)
+        .collect();
     let opacity_menu = Submenu::with_items(app, "Opacity", true, &op_refs)?;
 
+    // Character submenu — one checkable item per discovered character, checked =
+    // active. Selecting one persists the choice and emits "character-changed" so
+    // the frontend re-fetches the resolved assets (no window rebuild).
+    let active_char = shared
+        .user
+        .lock()
+        .map(|u| u.character.clone())
+        .unwrap_or_default();
+    let mut char_items: Vec<CheckMenuItem<_>> = Vec::new();
+    for c in &shared.characters {
+        let id = &c.manifest.id;
+        char_items.push(CheckMenuItem::with_id(
+            app,
+            format!("character:{id}"),
+            &c.manifest.name,
+            true,
+            *id == active_char,
+            None::<&str>,
+        )?);
+    }
+    let char_refs: Vec<&dyn tauri::menu::IsMenuItem<_>> = char_items
+        .iter()
+        .map(|i| i as &dyn tauri::menu::IsMenuItem<_>)
+        .collect();
+    let character_menu = Submenu::with_items(app, "Character", true, &char_refs)?;
+
     let quit = MenuItem::with_id(app, "quit", "Quit burnRat", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&toggle, &opacity_menu, &quit])?;
+    let menu = Menu::with_items(app, &[&toggle, &opacity_menu, &character_menu, &quit])?;
 
     TrayIconBuilder::new()
         .icon(app.default_window_icon().unwrap().clone())
@@ -403,6 +486,22 @@ fn build_tray(app: &tauri::App, shared: Arc<Shared>) -> tauri::Result<()> {
                             u.opacity = pct as f64 / 100.0;
                         }
                         shared.persist();
+                    }
+                }
+                _ if id.starts_with("character:") => {
+                    let new_id = id.trim_start_matches("character:").to_string();
+                    if shared.characters.iter().any(|c| c.manifest.id == new_id) {
+                        if let Ok(mut u) = shared.user.lock() {
+                            u.character = new_id.clone();
+                        }
+                        shared.persist();
+                        // Keep the submenu radio-like: only the chosen item stays
+                        // checked (tray checkmarks don't auto-clear otherwise).
+                        for item in &char_items {
+                            let item_id = item.id().as_ref();
+                            let _ = item.set_checked(item_id == id);
+                        }
+                        let _ = app.emit("character-changed", &new_id);
                     }
                 }
                 _ => {}
@@ -424,6 +523,7 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .invoke_handler(tauri::generate_handler![active_character])
         .setup(move |app| {
             let config = Config::load();
 
@@ -433,20 +533,36 @@ pub fn run() {
                 .app_config_dir()
                 .map(|d| d.join("settings.json"))
                 .unwrap_or_else(|_| std::path::PathBuf::from("burnrat-settings.json"));
-            let user = UserConfig::load(
+            let mut user = UserConfig::load(
                 &config_path,
                 config.settings.plan.clone(),
                 config.settings.opacity,
+                config.settings.character.clone(),
             );
 
             let opacity_pct = (user.opacity * 100.0).round().clamp(0.0, 100.0) as u64;
+
+            // Discover characters before the tray (it builds the Character
+            // submenu from this list). If the saved character no longer exists,
+            // fall back to the first valid one so the tray check + emits agree.
+            let characters = character::discover(&character_dirs(app.handle()));
+            if characters.is_empty() {
+                eprintln!("burnRat: no valid characters found — the rat will not render");
+            } else if !characters.iter().any(|c| c.manifest.id == user.character) {
+                user.character = characters[0].manifest.id.clone();
+            }
 
             let shared = Arc::new(Shared {
                 opacity_pct: AtomicU64::new(opacity_pct),
                 click_through: AtomicBool::new(config.settings.click_through),
                 config_path,
                 user: Mutex::new(user),
+                characters,
             });
+
+            // Manage the shared state so the `active_character` command can reach
+            // it (the poll loop / tray hold their own Arc clones).
+            app.manage(shared.clone());
 
             // Start in the configured click-through mode.
             apply_click_through(app.handle(), config.settings.click_through);
@@ -460,14 +576,19 @@ pub fn run() {
             // Global shortcut: Ctrl/Cmd+Shift+M toggles pass-through (so clicks
             // fall through to the app underneath when the rat is in the way).
             {
-                use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+                use tauri_plugin_global_shortcut::{
+                    Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
+                };
                 let sc = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyM);
                 let sc_shared = shared.clone();
-                if let Err(e) = app.global_shortcut().on_shortcut(sc, move |app, _shortcut, event| {
-                    if event.state() == ShortcutState::Pressed {
-                        toggle_click_through(app, &sc_shared);
-                    }
-                }) {
+                if let Err(e) =
+                    app.global_shortcut()
+                        .on_shortcut(sc, move |app, _shortcut, event| {
+                            if event.state() == ShortcutState::Pressed {
+                                toggle_click_through(app, &sc_shared);
+                            }
+                        })
+                {
                     eprintln!("burnRat: failed to register move-mode shortcut: {e}");
                 }
             }

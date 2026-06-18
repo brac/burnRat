@@ -75,6 +75,17 @@ body {
   pointer-events: none;
 }
 
+/* Near-limit overlay — drawn over the base pose, opacity set per-tick from the
+   backend's near_limit_opacity ramp. Sits between the sprite and the hat. */
+.overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+}
+
 /* Dev-only state picker — injected by main.ts only in `tauri dev` (never in a
    release build). Lets you force any pose in-window instead of via the tray.
    pointer-events:auto so it's clickable; the rat stays the drag handle. */

@@ -13,17 +13,33 @@ use serde::{Deserialize, Serialize};
 pub struct UserConfig {
     pub plan: String,
     pub opacity: f64,
+    /// Active character id (selected from the tray "Character" submenu).
+    /// Defaults to the value in `settings.default.json`.
+    #[serde(default)]
+    pub character: String,
 }
 
 impl UserConfig {
-    pub fn load(path: &PathBuf, default_plan: String, default_opacity: f64) -> Self {
-        std::fs::read_to_string(path)
+    pub fn load(
+        path: &PathBuf,
+        default_plan: String,
+        default_opacity: f64,
+        default_character: String,
+    ) -> Self {
+        let mut cfg: UserConfig = std::fs::read_to_string(path)
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or(UserConfig {
+            .unwrap_or_else(|| UserConfig {
                 plan: default_plan,
                 opacity: default_opacity,
-            })
+                character: default_character.clone(),
+            });
+        // An older settings.json (pre-character) deserializes with an empty
+        // character via `#[serde(default)]` — backfill the configured default.
+        if cfg.character.is_empty() {
+            cfg.character = default_character;
+        }
+        cfg
     }
 
     pub fn save(&self, path: &PathBuf) {

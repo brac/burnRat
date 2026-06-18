@@ -14,6 +14,9 @@
     <div id="pet" class="pet state-sleeping" data-tauri-drag-region>
       <div class="stack">
         <img id="sprite" class="sprite" alt="" draggable="false" />
+        <!-- Near-limit (quota-proximity) overlay; opacity driven by the backend,
+             hidden until a character supplies a quotaProximity asset. -->
+        <img id="overlay" class="overlay" alt="" draggable="false" hidden />
         <!-- Per-model hat overlay; hidden until a hat image exists for the model. -->
         <img id="hat" class="hat" alt="" draggable="false" hidden />
       </div>

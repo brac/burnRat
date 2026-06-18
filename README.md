@@ -30,9 +30,9 @@ A brief **surprised** pop plays when the rat perks up from rest into work. Thres
 
 **Napping is smart about your messages.** The nap clock runs from the last conversational line (yours *or* Claude's), so sending a message resets it — no jarring `done → message → nap`. Right after you send a message the rat holds the idle pose longer (`sentHoldSeconds`, default 3 min) so it doesn't nap through the dead air before Claude starts responding, then naps if nothing happens. The rat also won't nap while the burn rate is still elevated — it always winds down through its lower states (e.g. `onfire → stressed → working → calm → sleeping`) rather than snapping straight from a high state into a nap.
 
-### Sprites
+### Characters
 
-Frames live in [`src/sprites/`](src/sprites/) and are auto-discovered by filename: drop in `<state>.png` plus optional `<state>_1.png`, `<state>_2.png`, … and they're grouped into that state's loop automatically (1 frame = static, 2 = alternate, 3+ = smooth ping-pong). No code changes needed — new files are picked up on the next dev reload / build.
+The pet is a **character** — a folder under [`characters/`](characters/) holding a `character.json` manifest plus ~10 PNGs, one per state (`sleeping`, `working`, `frantic`, …) plus a near-limit overlay and the transient event poses. Characters are discovered and loaded at **runtime**: drop a new folder in (bundled with the app, or in the per-user characters dir) and it appears in the tray **Character** submenu to swap live — no rebuild. The filename is the contract; extra ping-pong frames (`working_1.png`, `working_2.png`, …) are declared per-entry in the manifest (1 frame = static, 2 = alternate, 3+ = smooth ping-pong). The [`rat`](characters/rat/) is the reference character.
 
 ---
 
@@ -97,4 +97,4 @@ User-changed settings (opacity) persist to your OS app-config dir; defaults are 
 ## License
 
 - **Code:** [MIT](LICENSE).
-- **Art:** the sprite and hat artwork in [`src/sprites/`](src/sprites/) and [`src/hats/`](src/hats/) is **not** covered by the MIT license — © the burnRat authors, all rights reserved. Please don't redistribute or reuse the art without permission.
+- **Art:** the character and hat artwork in [`characters/`](characters/) and [`src/hats/`](src/hats/) is **not** covered by the MIT license — © the burnRat authors, all rights reserved. Please don't redistribute or reuse the art without permission.

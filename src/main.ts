@@ -5,6 +5,7 @@
 // event — and the view composes them.
 
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 
 interface GameState {
   smoothedTpm: number;
@@ -35,48 +36,36 @@ const EVENT_MS = 900;
 // smoothing itself lives in Rust (rateWindowSeconds).
 const RATE_EASE_ALPHA = 0.15;
 
-// Auto-discover sprite frames from src/sprites/. Drop in `<state>.png` plus
-// optional `<state>_1.png`, `<state>_2.png`, … and they're grouped into that
-// state's animation loop automatically: 1 frame = static, 2 = alternate,
-// 3+ = smooth ping-pong. Adding a file is picked up on the next dev reload /
-// build — no code changes needed.
-const modules = import.meta.glob("./sprites/*.png", {
-  eager: true,
-  query: "?url",
-  import: "default",
-}) as Record<string, string>;
+// The active character's resolved frames, keyed by pose name — the 7 base
+// states + the event names ("refreshed"/"error"/"flinch") + "quotaProximity".
+// Supplied at runtime by the Rust `active_character` command as base64 data
+// URLs (the character is a folder of art behind a manifest, discovered on the
+// backend), and rebuilt on a live character switch. Empty until the first load
+// resolves; the render loop simply skips painting while a pose has no frames.
+let frames: Record<string, string[]> = {};
+// The quota-proximity overlay frames (drawn over the base pose at a backend-set
+// opacity). Usually a single static image.
+let overlayUrls: string[] = [];
 
-// Group file URLs by state base name, ordered by frame index.
-// "onfire.png" -> base "onfire" idx 0; "onfire_1.png" -> base "onfire" idx 1.
-const FRAMES: Record<string, string[]> = {};
-{
-  const tmp: Record<string, Array<{ idx: number; url: string }>> = {};
-  for (const [path, url] of Object.entries(modules)) {
-    const name = path.split("/").pop()!.replace(/\.png$/i, "");
-    const m = name.match(/^(.+?)_(\d+)$/);
-    const base = m ? m[1] : name;
-    const idx = m ? parseInt(m[2], 10) : 0;
-    (tmp[base] ??= []).push({ idx, url });
-  }
-  for (const [base, arr] of Object.entries(tmp)) {
-    FRAMES[base] = arr.sort((a, b) => a.idx - b.idx).map((x) => x.url);
-  }
+// One resolved character from the backend — data-URL frames plus placement.
+interface ResolvedAsset {
+  urls: string[];
+  anchor: { x: number; y: number };
+  canvas: { width: number; height: number };
+}
+interface ResolvedCharacter {
+  id: string;
+  name: string;
+  renderer: string;
+  canvas: { width: number; height: number };
+  anchor: { x: number; y: number };
+  assets: Record<string, ResolvedAsset>;
 }
 
-// Map a base-state / event name to its frame base name (where the existing art
-// uses a different filename). Everything else uses the name directly; anything
-// missing falls back to the idle pose. This bridge exists only while Stage 1
-// still renders from the build-time src/sprites glob — Stage 2 replaces the
-// whole glob with per-character assets named exactly by state.
-const STATE_BASE: Record<string, string> = {
-  thinking: "idle", // Layer-1 thinking pose uses the old idle art
-  frantic: "stressed", // renamed from the old stressed pose
-  flinch: "surprised", // the flinch event uses the old surprised art
-  // refreshed / error have no art yet → fall back to idle.
-};
-
+// Look up a pose's frames, falling back to the always-present `thinking` pose
+// so an unmapped name never renders blank.
 function framesFor(state: string): string[] {
-  return FRAMES[STATE_BASE[state] ?? state] ?? FRAMES["idle"] ?? [];
+  return frames[state] ?? frames["thinking"] ?? [];
 }
 
 // Dev-only: every pose the in-window picker can force — the 7 base states plus
@@ -103,12 +92,6 @@ for (const [path, url] of Object.entries(hatModules)) {
   HATS[path.split("/").pop()!.replace(/\.png$/i, "")] = url;
 }
 
-// Preload all frames so transitions don't flash a blank.
-for (const url of Object.values(FRAMES).flat()) {
-  const img = new Image();
-  img.src = url;
-}
-
 // Auto-scaling rate formatter. The unit ("sec"/"min") is chosen in Rust (with
 // hysteresis); here we just render the eased value in it. Prefer integers so the
 // last digit doesn't flicker — the easing carries the visible motion.
@@ -131,8 +114,45 @@ function formatCountdown(min: number): string {
 window.addEventListener("DOMContentLoaded", () => {
   const pet = document.querySelector<HTMLElement>("#pet");
   const sprite = document.querySelector<HTMLImageElement>("#sprite");
+  const overlay = document.querySelector<HTMLImageElement>("#overlay");
   const hat = document.querySelector<HTMLImageElement>("#hat");
   const readout = document.querySelector<HTMLElement>("#readout");
+
+  // Fetch the active character from the backend and rebuild the frame table.
+  // Called once on startup and again whenever the tray "Character" submenu fires
+  // a "character-changed" event — a live swap with no window rebuild.
+  async function reloadCharacter() {
+    try {
+      const c = await invoke<ResolvedCharacter | null>("active_character");
+      if (!c) return;
+      const next: Record<string, string[]> = {};
+      for (const [name, asset] of Object.entries(c.assets)) {
+        next[name] = asset.urls;
+      }
+      frames = next;
+      overlayUrls = c.assets["quotaProximity"]?.urls ?? [];
+      // Point the overlay image at the quota-proximity art (opacity is driven
+      // per-tick by the game-state listener); hide it if the character has none.
+      if (overlay) {
+        if (overlayUrls.length > 0) {
+          overlay.src = overlayUrls[0];
+          overlay.hidden = false;
+        } else {
+          overlay.removeAttribute("src");
+          overlay.hidden = true;
+        }
+      }
+      // Preload every frame so pose/character transitions don't flash a blank.
+      for (const url of Object.values(frames).flat()) {
+        const img = new Image();
+        img.src = url;
+      }
+    } catch (e) {
+      console.error("burnRat: failed to load character", e);
+    }
+  }
+  void reloadCharacter();
+  listen<string>("character-changed", () => void reloadCharacter());
 
   let liveState = "sleeping"; // Layer 1 base pose from the backend
   let step = 0;
@@ -221,6 +241,13 @@ window.addEventListener("DOMContentLoaded", () => {
     countdownMin = s.timeRemainingMin;
     quotaPct = s.quotaPercent;
     nearLimit = s.nearLimitOpacity;
+
+    // Layer 2 — fade the near-limit overlay in over the base pose. The opacity
+    // ramp is computed in Rust; here we only apply it (and keep it off when
+    // there's no overlay art for this character).
+    if (overlay && !overlay.hidden) {
+      overlay.style.opacity = String(nearLimit);
+    }
 
     // Per-model hat overlay (hidden when there's no art for this model). Runs
     // before paintClass so liveModel is current for the class string.

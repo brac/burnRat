@@ -19,6 +19,8 @@
     "max20": 0
   },
   "opacity": 1.0,
+  "$characterNote": "Active character id — a folder under characters/ (dev: repo, prod: bundled resources, plus a user drop-in dir). The folder's character.json + ~10 PNGs supply every pose; swap live from the tray Character submenu.",
+  "character": "rat",
   "clickThrough": false,
   "position": { "x": null, "y": null },
   "display": {
