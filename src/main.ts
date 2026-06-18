@@ -26,10 +26,22 @@ interface GameState {
 }
 
 const FRAME_MS = 280; // sprite animation cadence
-// How long a one-shot event pose (flinch/refreshed/error) plays before handing
-// back to the base pose. Pure presentation — the *decision* to fire (priority +
-// debounce) is made in Rust; this is just the on-screen dwell.
+// How long a one-shot event pose plays before handing back to the base pose.
+// Pure presentation — the *decision* to fire (priority + debounce) is made in
+// Rust; this is just the on-screen dwell. Most events are a quick beat; per-event
+// overrides below extend specific ones.
 const EVENT_MS = 900;
+// Per-event dwell overrides (ms). `refreshed` lingers as a "fresh quota"
+// celebration — 5 minutes — instead of a quick flash. It still yields early if
+// real work resumes (see the listener), so it never masks the working poses.
+const EVENT_DURATION_MS: Record<string, number> = {
+  refreshed: 5 * 60 * 1000,
+};
+const eventDurationMs = (name: string): number =>
+  EVENT_DURATION_MS[name] ?? EVENT_MS;
+// Base poses that mean "actively burning" — a lingering `refreshed` celebration
+// bows out the moment one of these arrives so the live work shows through.
+const WORK_POSES = new Set(["working", "frantic", "onfire", "spent"]);
 // Readout easing: each animation frame the shown rate approaches the latest
 // value by this fraction. Smaller = smoother, lazier glide. Pure presentation —
 // it "fakes" a smooth signal over the chunky, per-turn token writes; the data
@@ -278,11 +290,18 @@ window.addEventListener("DOMContentLoaded", () => {
     paintClass();
     if (pet) pet.style.opacity = String(s.opacity);
 
-    // Layer 3 — start a one-shot event pose (the sprite loop plays it for its
-    // dwell). The backend already debounced/prioritized which one to send.
+    // A lingering `refreshed` celebration bows out early once real work
+    // resumes, so it never masks the working/onfire poses for its full dwell.
+    if (activeEvent === "refreshed" && WORK_POSES.has(s.baseState)) {
+      activeEvent = null;
+    }
+
+    // Layer 3 — start an event pose (the sprite loop plays it for its dwell).
+    // The backend already debounced/prioritized which one to send; the dwell is
+    // per-event (e.g. `refreshed` lingers 5 min, a flinch is a quick beat).
     if (s.event) {
       activeEvent = s.event;
-      eventUntil = Date.now() + EVENT_MS;
+      eventUntil = Date.now() + eventDurationMs(s.event);
     }
 
     // Feed the eased readout loop; it renders on its own frame cadence.
