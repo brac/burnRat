@@ -5,6 +5,7 @@
   "pollIntervalMaxSeconds": 10,
   "$rateCacheWeightNote": "How much cache tokens feed the burn signal that drives the rat: 0 = work only (input+output, lively small numbers), 1 = full cache included (~70x bigger numbers, more rat action). The thresholds in thresholds.json are calibrated for THIS weight — if you change it, retune them. Blend with any value in between.",
   "rateCacheWeight": 1.0,
+  "$rateWindowSecondsNote": "Smoothing time constant (tau) for the burn-rate EMA, in seconds — NOT a hard window. Larger = smoother/slower (takes ~tau seconds to forget a burst); smaller = twitchier. At 15 the EMA's peak magnitude matches the old 15s window, so the thresholds in thresholds.json stay calibrated.",
   "rateWindowSeconds": 15,
   "blockWindowHours": 5,
   "plan": "max5",

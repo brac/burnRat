@@ -20,6 +20,10 @@ pub struct Settings {
     pub poll_interval_seconds: u64,
     pub poll_interval_min_seconds: u64,
     pub poll_interval_max_seconds: u64,
+    /// Smoothing time constant (tau, seconds) for the burn-rate EMA in
+    /// `rate.rs` — not a hard window. Larger = smoother/slower (~tau seconds to
+    /// forget a burst). Kept under the old `rateWindowSeconds` key so existing
+    /// user `settings.json` overrides don't need migrating.
     pub rate_window_seconds: i64,
     /// How much cache tokens count toward the burn signal: 0.0 = work only
     /// (input+output), 1.0 = full cache included. The state thresholds are
