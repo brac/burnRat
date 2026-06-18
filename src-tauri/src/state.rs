@@ -21,6 +21,11 @@ use crate::config::Thresholds;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BaseState {
     Sleeping,
+    /// Awake but waiting — we sent a message and are awaiting Claude's reply, no
+    /// work flowing yet. Distinct from `Thinking` (Claude is actively generating
+    /// at a low rate). An optional pose: characters without `idle.png` fall back
+    /// to `thinking` in the view.
+    Idle,
     Thinking,
     Working,
     Frantic,
@@ -33,6 +38,7 @@ impl BaseState {
     pub fn as_str(&self) -> &'static str {
         match self {
             BaseState::Sleeping => "sleeping",
+            BaseState::Idle => "idle",
             BaseState::Thinking => "thinking",
             BaseState::Working => "working",
             BaseState::Frantic => "frantic",
@@ -151,13 +157,15 @@ impl StateMachine {
         }
 
         // A fresh user message (awaiting Claude, no tokens flowing yet) → the
-        // latency-gap "thinking" pose, so the rat ponders rather than napping or
-        // sitting calm through the dead air before Claude responds.
+        // `idle` waiting pose: the rat hangs out through the dead air before
+        // Claude responds (and never naps mid-wait — see the poll loop). This is
+        // distinct from `thinking`, which is Claude actively generating at a low
+        // rate. Characters without idle art fall back to thinking in the view.
         if sent {
             self.level = CALM;
             self.onfire_since = None;
             self.spent_until = None;
-            return BaseState::Thinking;
+            return BaseState::Idle;
         }
 
         self.advance_level(smoothed_tpm);
@@ -448,13 +456,14 @@ mod tests {
     }
 
     #[test]
-    fn sent_maps_to_thinking() {
+    fn sent_maps_to_idle() {
         let mut m = StateMachine::new(thresholds());
-        // A just-sent user message → thinking, even over a stale high rate.
+        // A just-sent user message → idle (awaiting Claude), even over a stale
+        // high rate. Distinct from thinking (Claude actively generating).
         assert_eq!(
             m.update(true, false, false, true, false, 30_000.0, 0.0, t0())
                 .0,
-            BaseState::Thinking
+            BaseState::Idle
         );
     }
 }

@@ -80,11 +80,11 @@ function framesFor(state: string): string[] {
   return frames[state] ?? frames["thinking"] ?? [];
 }
 
-// Dev-only: every pose the in-window picker can force — the 7 base states plus
-// the transient events. Keep in sync with BaseState::as_str() in
-// src-tauri/src/state.rs. Only used when import.meta.env.DEV is true.
+// Dev-only: every pose the in-window picker can force — the base states (incl.
+// optional `idle`) plus the transient events. Keep in sync with
+// BaseState::as_str() in src-tauri/src/state.rs. Only used when DEV is true.
 const DEV_STATES = [
-  "sleeping", "thinking", "working", "frantic", "onfire", "spent", "done",
+  "sleeping", "idle", "thinking", "working", "frantic", "onfire", "spent", "done",
   "refreshed", "error", "flinch",
 ];
 // Vite sets this true under `tauri dev`, false in a production build, so the

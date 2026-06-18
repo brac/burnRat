@@ -30,6 +30,9 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 /// The fixed base-state contract every character must satisfy (Layer 1).
+/// `idle` is a recognized *optional* eighth pose (awaiting Claude's reply) — if a
+/// manifest declares it the view uses it, otherwise it falls back to `thinking`,
+/// so it's not required here.
 const REQUIRED_STATES: [&str; 7] = [
     "sleeping", "thinking", "working", "frantic", "onfire", "spent", "done",
 ];

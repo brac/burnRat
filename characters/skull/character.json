@@ -9,6 +9,7 @@
 
   "states": {
     "sleeping": { "asset": "sleeping.png" },
+    "idle":     { "asset": "idle.png" },
     "thinking": { "asset": "thinking.png" },
     "working":  { "asset": "working.png" },
     "frantic":  { "asset": "frantic.png" },
