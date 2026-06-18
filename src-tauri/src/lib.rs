@@ -1,6 +1,7 @@
 mod blocks;
 mod config;
 mod data;
+mod events;
 mod rate;
 mod state;
 mod userconfig;
@@ -18,6 +19,7 @@ use tauri::{
 
 use crate::config::Config;
 use crate::data::{Awaiting, DataMonitor};
+use crate::events::{EventResolver, RefreshTracker};
 use crate::rate::{RateTracker, UnitSelector};
 use crate::state::StateMachine;
 use crate::userconfig::UserConfig;
@@ -55,12 +57,22 @@ struct GameState {
     time_remaining_min: i64,
     is_active: bool,
     opacity: f64,
-    state: &'static str,
+    /// Layer 1 — the base pose ("sleeping"/"thinking"/"working"/"frantic"/
+    /// "onfire"/"spent"/"done").
+    base_state: &'static str,
+    /// Layer 2 — near-limit overlay opacity (0..1, presentation-ready) and the
+    /// raw quota fraction for the numeric readout (0 if no credible ceiling).
+    near_limit_opacity: f64,
+    quota_percent: f64,
+    /// Layer 3 — the transient event to play this tick, if any
+    /// ("refreshed"/"error"/"flinch").
     event: Option<&'static str>,
     /// Unit the frontend should render the rate readout in ("sec" / "min").
     rate_unit: &'static str,
     /// Model family driving the rat's hat ("opus"/"sonnet"/"haiku"/…/"none").
     model: &'static str,
+    /// Active character id (lets the view guard swaps). Single character for now.
+    character: &'static str,
 }
 
 /// Collapse a model id (e.g. "claude-opus-4-8") to a family the frontend maps
@@ -151,18 +163,18 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
         let mut learned_peak =
             data::historical_peak_block(&projects_dir, window_hours, history, Utc::now());
 
-        let long_running = config.thresholds.long_running_seconds;
         // Rate floor below which the rat is no longer "visibly working": the
         // working-state exit (down) cutoff. Used to keep the rat awake while the
         // burn rate is still elevated (see the nap gate in the loop).
         let working_floor = config.thresholds.states.working.down;
+        let quota_cfg = config.thresholds.quota;
 
         let mut monitor = DataMonitor::new(projects_dir.clone(), window_hours);
         let mut tracker = RateTracker::new(config.settings.rate_window_seconds);
         let mut unit_selector = UnitSelector::new(config.settings.display);
         let mut machine = StateMachine::new(config.thresholds.clone());
-        let mut refresh_tracker =
-            state::RefreshTracker::new(config.thresholds.refreshed_hold_seconds);
+        let mut refresh_tracker = RefreshTracker::new();
+        let mut event_resolver = EventResolver::new(config.thresholds.events.clone());
 
         // Watch the projects tree: the moment Claude writes a token we react,
         // instead of busy-polling. `interval` is just the idle fallback tick so
@@ -219,9 +231,10 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
             };
             let asking = matches!(kind, Awaiting::Asking);
             let done = matches!(kind, Awaiting::Done) && nap_idle <= done_hold;
-            // An API error holds like a question (concern pose, doesn't nap).
+            // An API error is now a transient one-shot event (Layer 3) — it no
+            // longer holds the rat awake; it's fed to the event resolver below.
             let error = matches!(kind, Awaiting::Error);
-            let awaiting_user = done || asking || error;
+            let awaiting_user = done || asking;
 
             // A fresh user message (awaiting Claude) holds the idle pose longer
             // than a plain stall, so the rat doesn't nap through the dead air
@@ -248,10 +261,10 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
                     None => (0, 0, 0, 0, false, false),
                 };
 
-            // Quota refresh: the 5h window we were watching just rolled over.
-            // Holds the `refreshed` pose (like waiting) even though the old
-            // window went inactive, so fold it into "awake".
-            let refreshed = refresh_tracker.update(
+            // Layer 3 — quota-refresh rising edge: the 5h window we were watching
+            // just rolled over. A one-shot now (not a held pose), fed to the
+            // event resolver below.
+            let refreshed_edge = refresh_tracker.update(
                 blocks::latest_used_window_end(&grouped),
                 recent_activity,
                 now,
@@ -260,22 +273,15 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
             // (nap_idle) is purely time-since-last-conversational-line, but that
             // line's timestamp can already be stale relative to wall-clock `now`
             // — e.g. a single long turn lands one line carrying a big token jump
-            // (spiking the smoothed rate to stressed/onfire) whose timestamp
+            // (spiking the smoothed rate to frantic/onfire) whose timestamp
             // predates now by more than idle_timeout. Without this gate the rat
-            // snaps straight from stressed/onfire to sleeping, skipping the
+            // snaps straight from frantic/onfire to sleeping, skipping the
             // natural decay. Stay awake until the rate falls out of the working
-            // band so it always glides down (stressed -> working -> calm -> sleep,
-            // or the post-onfire spent crash) instead of cutting to a nap.
+            // band so it always glides down (frantic -> working -> thinking ->
+            // sleep, or the post-onfire spent crash) instead of cutting to a nap.
             let burning = smoothed >= working_floor;
-            let awake = base_awake || refreshed || burning;
+            let awake = base_awake || burning;
             let is_active = awake;
-
-            // Long-running session: the active block has been going a long time.
-            // TODO: first cut — only flags age; revisit whether it should be its
-            // own sustained pose, factor in cumulative work, etc.
-            let longrun = active
-                .map(|b| (now - b.start).num_seconds() >= long_running)
-                .unwrap_or(false);
 
             // Keep adapting the ceiling if a block completes while we're running.
             let mem_completed_peak = grouped
@@ -286,10 +292,8 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
                 .unwrap_or(0);
             learned_peak = learned_peak.max(mem_completed_peak);
 
-            // Approaching-limit warning band: how close consumed (incl. cache) is
-            // to the ceiling. 0 none, 1 within 10%, 2 within 5%, 3 within 1%
-            // (most severe wins). Manual cap wins; else the learned ceiling, but
-            // only once it's credible enough to not cry wolf.
+            // Layer 2 — quota proximity. Manual cap wins; else the learned
+            // ceiling, but only once it's credible enough to not cry wolf.
             let ceiling = if manual_limit > 0 {
                 manual_limit
             } else if learned_peak >= limit_min_credible {
@@ -297,47 +301,31 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
             } else {
                 0
             };
-            // 0 none, 1 within 10%, 2 within 5%, 3 within 1%, 4 at/over limit.
-            let warn_level = if ceiling > 0 && active.is_some() {
-                let remaining = 1.0 - consumed_with_cache as f64 / ceiling as f64;
-                let a = &config.thresholds.approaching;
-                if remaining <= 0.0 {
-                    4
-                } else if remaining <= a.warn1 {
-                    3
-                } else if remaining <= a.warn5 {
-                    2
-                } else if remaining <= a.warn10 {
-                    1
-                } else {
-                    0
-                }
+            let quota_percent = if ceiling > 0 && active.is_some() {
+                consumed_with_cache as f64 / ceiling as f64
             } else {
-                0
+                0.0
+            };
+            // Overlay opacity ramps 0..1 between start% and full% of the ceiling.
+            let near_limit_opacity = if quota_percent >= quota_cfg.full_percent {
+                1.0
+            } else if quota_percent <= quota_cfg.start_percent
+                || quota_cfg.full_percent <= quota_cfg.start_percent
+            {
+                0.0
+            } else {
+                (quota_percent - quota_cfg.start_percent)
+                    / (quota_cfg.full_percent - quota_cfg.start_percent)
             };
 
-            let (base, event) =
-                machine.update(awake, done, asking, recent_activity, smoothed, instant, now);
+            // Layer 1 — base pose (+ a transient flinch for Layer 3).
+            let (base, flinch) =
+                machine.update(awake, done, asking, sent, recent_activity, smoothed, instant, now);
 
-            // Final state, by priority: an API error wins; otherwise a pending
-            // question/finished turn stays; otherwise a fresh quota refresh; then
-            // the approaching-limit / at-limit warnings layer over the rate state;
-            // and a long-running session shows only when otherwise idle.
-            use state::CreatureState;
-            let creature = if error && awake {
-                CreatureState::Error
-            } else if matches!(base, CreatureState::Waiting | CreatureState::Done) {
-                base
-            } else if refreshed {
-                CreatureState::Refreshed
-            } else {
-                let warned = state::apply_approaching(base, warn_level);
-                if longrun && warned == CreatureState::Calm {
-                    CreatureState::LongRun
-                } else {
-                    warned
-                }
-            };
+            // Layer 3 — resolve the single event to play this tick (priority +
+            // debounce): API error, quota-refresh edge, or rate-spike flinch.
+            let event = event_resolver.resolve(refreshed_edge, error, flinch, now);
+
             let rate_unit = unit_selector.select(smoothed).as_str();
             let model = model_family(monitor.current_model());
 
@@ -350,10 +338,13 @@ fn spawn_poll_loop(app: tauri::AppHandle, shared: Arc<Shared>) {
                 time_remaining_min: remaining,
                 is_active,
                 opacity,
-                state: creature.as_str(),
+                base_state: base.as_str(),
+                near_limit_opacity,
+                quota_percent,
                 event,
                 rate_unit,
                 model,
+                character: "rat",
             };
 
             let _ = app.emit("game-state", &game);

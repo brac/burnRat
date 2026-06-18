@@ -113,14 +113,24 @@ pub struct SpikeCfg {
     pub instant_tpm_flinch: f64,
 }
 
-/// Remaining-quota fractions (1 - consumed/limit) at/under which each escalating
-/// approaching-limit warning becomes eligible. E.g. warn10 = 0.10 → within 10%.
+/// Quota-proximity ramp (Layer 2). The near-limit overlay fades in linearly as
+/// `consumedWithCache / ceiling` climbs from `start_percent` to `full_percent`
+/// (0 below start, 1 at/after full). Replaces the old discrete warn10/5/1 bands.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ApproachingCfg {
-    pub warn10: f64,
-    pub warn5: f64,
-    pub warn1: f64,
+pub struct QuotaCfg {
+    pub start_percent: f64,
+    pub full_percent: f64,
+}
+
+/// Layer-3 event resolution: priority order (highest first) and per-event
+/// cooldowns so a retryable hiccup can't spam an event.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventsCfg {
+    pub priority: Vec<String>,
+    pub error_debounce_seconds: i64,
+    pub refreshed_cooldown_seconds: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -130,7 +140,8 @@ pub struct Thresholds {
     pub spent: SpentCfg,
     pub onfire: OnfireCfg,
     pub spike: SpikeCfg,
-    pub approaching: ApproachingCfg,
+    pub quota: QuotaCfg,
+    pub events: EventsCfg,
     /// A token written within this many seconds makes the rat at least
     /// `working` immediately, without waiting for the smoothed rate to climb.
     pub activity_floor_seconds: i64,
@@ -142,12 +153,6 @@ pub struct Thresholds {
     /// Claude) before napping — longer than `idle_timeout_seconds` so we don't
     /// nap through the "dead air" before Claude starts responding.
     pub sent_hold_seconds: i64,
-    /// How long to hold the `refreshed` pose after the 5h window rolls over
-    /// (fresh quota) before letting the rat nap.
-    pub refreshed_hold_seconds: i64,
-    /// Active-block age (seconds) beyond which a session counts as long-running.
-    /// TODO: this is a first cut — revisit the exact semantics/visual.
-    pub long_running_seconds: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -183,4 +188,24 @@ fn parse_with_override<T: for<'de> Deserialize<'de>>(file: &str, embedded: &str)
         }
     }
     serde_json::from_str(embedded).expect("embedded default config must be valid")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Both the embedded defaults and the live `data/*.json` must deserialize
+    /// into the current structs — this catches schema drift when fields change.
+    #[test]
+    fn loads_config() {
+        // Embedded-only (guaranteed valid or the .expect panics).
+        let embedded: Thresholds = serde_json::from_str(DEFAULT_THRESHOLDS).unwrap();
+        assert!(embedded.quota.full_percent >= embedded.quota.start_percent);
+        assert!(!embedded.events.priority.is_empty());
+
+        // The full load path (live override if present, else embedded).
+        let c = Config::load();
+        assert!(c.thresholds.quota.full_percent >= c.thresholds.quota.start_percent);
+        assert!(c.settings.rate_window_seconds >= 1);
+    }
 }

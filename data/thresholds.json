@@ -21,22 +21,23 @@
     "$note": "instant-rate jump (tokens/min) above this triggers a transient flinch bounce (cache-inclusive scale; ~80k on work-only)",
     "instantTpmFlinch": 6000000
   },
-  "approaching": {
-    "$note": "Escalating 'approaching limit' warnings, by remaining-quota fraction (1 - consumedWithCache/ceiling). The ceiling auto-calibrates to your largest recent completed block (see settings.default.json limitHistoryDays / limitMinCredibleTokens; planLimits can override it). Layered visibility: warn10 shows over idle only; warn5 over idle+working; warn1 over everything except sleep/waiting/done.",
-    "warn10": 0.10,
-    "warn5": 0.05,
-    "warn1": 0.01
+  "quota": {
+    "$note": "Layer 2 — near-limit overlay ramp. The overlay opacity rises linearly from 0 to 1 as consumedWithCache/ceiling climbs from startPercent to fullPercent (the readout shows a % in this band, then a refresh countdown at/over the ceiling). The ceiling auto-calibrates to your largest recent completed block (see settings.default.json limitHistoryDays / limitMinCredibleTokens; planLimits can override it).",
+    "startPercent": 0.90,
+    "fullPercent": 0.99
+  },
+  "events": {
+    "$note": "Layer 3 — transient one-shot events. `priority` resolves which single event plays when several fire at once (highest first). The cooldowns keep a retryable hiccup from spamming an event; flinch is gated by the spike detector so it needs none.",
+    "priority": ["error", "refreshed", "flinch"],
+    "errorDebounceSeconds": 30,
+    "refreshedCooldownSeconds": 60
   },
   "$activityFloorNote": "Fast-attack perk-up: if a token was written within this many seconds, the rat is at least 'working' immediately (don't wait for the smoothed rate to climb). Higher states still come from the smoothed rate.",
   "activityFloorSeconds": 15,
-  "$idleTimeoutNote": "Smart napping: the nap clock runs from the last conversational line (user or assistant), so a new message resets it; 'waiting' (an open question) never naps. This is the hold time (seconds) after the last activity before the rat sleeps.",
+  "$idleTimeoutNote": "Smart napping: the nap clock runs from the last conversational line (user or assistant), so a new message resets it; 'done' (an open question / finished turn) never naps until done_hold elapses. This is the hold time (seconds) after the last activity before the rat sleeps.",
   "idleTimeoutSeconds": 60,
   "$doneHoldNote": "How long to hold the 'done' pose after a finished turn before the rat naps. 120 = 2 minutes.",
   "doneHoldSeconds": 120,
-  "$sentHoldNote": "After the user sends a message we're awaiting Claude. Hold the idle pose this long before napping — longer than idleTimeoutSeconds so the rat doesn't nap through the 'dead air' before Claude starts responding. 180 = 3 minutes.",
-  "sentHoldSeconds": 180,
-  "$refreshedHoldNote": "After the 5h billing window rolls over (fresh quota), hold the 'refreshed' pose this long before the rat is allowed to nap. 300 = 5 minutes.",
-  "refreshedHoldSeconds": 300,
-  "$longRunningNote": "TODO: first cut. Active-block age (seconds) beyond which the session counts as long-running and shows the 'longrun' pose over idle. 14400 = 4 hours.",
-  "longRunningSeconds": 14400
+  "$sentHoldNote": "After the user sends a message we're awaiting Claude. Hold the 'thinking' pose this long before napping — longer than idleTimeoutSeconds so the rat doesn't nap through the 'dead air' before Claude starts responding. 180 = 3 minutes.",
+  "sentHoldSeconds": 180
 }

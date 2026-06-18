@@ -1,6 +1,8 @@
 // burnRat frontend — a dumb clear-and-redraw view.
 // Sprite rendering runs on its own frame loop (for the working animation and
-// the brief surprised pop); the game-state event only updates the data.
+// the one-shot event poses); the game-state event only updates the data. The
+// backend resolves three layers — base pose, near-limit overlay, and transient
+// event — and the view composes them.
 
 import { listen } from "@tauri-apps/api/event";
 
@@ -13,13 +15,20 @@ interface GameState {
   timeRemainingMin: number;
   isActive: boolean;
   opacity: number;
-  state: string;
-  event: string | null;
+  baseState: string; // Layer 1 — sleeping/thinking/working/frantic/onfire/spent/done
+  nearLimitOpacity: number; // Layer 2 — overlay opacity 0..1 (presentation-ready)
+  quotaPercent: number; // Layer 2 — consumed/ceiling (0 if no ceiling); drives the % readout
+  event: string | null; // Layer 3 — transient: "refreshed"/"error"/"flinch"
   rateUnit: string; // "sec" | "min" — which unit to render the readout in
   model: string; // model family ("opus"/"sonnet"/…/"none") → hat
+  character: string; // active character id (single character for now)
 }
 
-const FRAME_MS = 280; // animation cadence; also the "1 frame" surprised duration
+const FRAME_MS = 280; // sprite animation cadence
+// How long a one-shot event pose (flinch/refreshed/error) plays before handing
+// back to the base pose. Pure presentation — the *decision* to fire (priority +
+// debounce) is made in Rust; this is just the on-screen dwell.
+const EVENT_MS = 900;
 // Readout easing: each animation frame the shown rate approaches the latest
 // value by this fraction. Smaller = smoother, lazier glide. Pure presentation —
 // it "fakes" a smooth signal over the chunky, per-turn token writes; the data
@@ -54,21 +63,28 @@ const FRAMES: Record<string, string[]> = {};
   }
 }
 
-// Map a creature state to its frame base name (states whose art uses a
-// different filename go here). Everything else uses the state name directly.
-const STATE_BASE: Record<string, string> = { calm: "idle" };
+// Map a base-state / event name to its frame base name (where the existing art
+// uses a different filename). Everything else uses the name directly; anything
+// missing falls back to the idle pose. This bridge exists only while Stage 1
+// still renders from the build-time src/sprites glob — Stage 2 replaces the
+// whole glob with per-character assets named exactly by state.
+const STATE_BASE: Record<string, string> = {
+  thinking: "idle", // Layer-1 thinking pose uses the old idle art
+  frantic: "stressed", // renamed from the old stressed pose
+  flinch: "surprised", // the flinch event uses the old surprised art
+  // refreshed / error have no art yet → fall back to idle.
+};
 
 function framesFor(state: string): string[] {
   return FRAMES[STATE_BASE[state] ?? state] ?? FRAMES["idle"] ?? [];
 }
 
-// Dev-only: every pose the in-window picker can force. Keep in sync with
-// CreatureState::as_str() in src-tauri/src/state.rs, plus "surprised" (the
-// transient perk-up pose). Only used when import.meta.env.DEV is true.
+// Dev-only: every pose the in-window picker can force — the 7 base states plus
+// the transient events. Keep in sync with BaseState::as_str() in
+// src-tauri/src/state.rs. Only used when import.meta.env.DEV is true.
 const DEV_STATES = [
-  "sleeping", "done", "waiting", "calm", "working", "stressed", "onfire",
-  "spent", "approaching10", "approaching5", "approaching1", "atlimit",
-  "refreshed", "error", "longrun", "surprised",
+  "sleeping", "thinking", "working", "frantic", "onfire", "spent", "done",
+  "refreshed", "error", "flinch",
 ];
 // Vite sets this true under `tauri dev`, false in a production build, so the
 // picker never ships. Read defensively so tsconfig need not include vite types.
@@ -118,15 +134,20 @@ window.addEventListener("DOMContentLoaded", () => {
   const hat = document.querySelector<HTMLImageElement>("#hat");
   const readout = document.querySelector<HTMLElement>("#readout");
 
-  let liveState = "sleeping";
-  let prevState = "sleeping";
-  let surprisedUntil = 0; // show the surprised sprite until this timestamp
+  let liveState = "sleeping"; // Layer 1 base pose from the backend
   let step = 0;
-  let countdownMin = 0; // minutes until window refresh (shown when at-limit)
+  let countdownMin = 0; // minutes until window refresh (shown at/over quota)
   let liveModel = "none";
+  let quotaPct = 0; // Layer 2 — consumed/ceiling
+  let nearLimit = 0; // Layer 2 — overlay opacity 0..1
+
+  // Layer-3 one-shot event player: while now < eventUntil, render activeEvent's
+  // frames, then fall back to the base pose.
+  let activeEvent: string | null = null;
+  let eventUntil = 0;
 
   // Dev-only forced pose (set via the in-window picker); null = follow live
-  // state. When set, it overrides the sprite, the pet class, and the readout.
+  // state. When set, it pins the sprite + the pet class.
   let devForced: string | null = null;
   const shownState = () => devForced ?? liveState;
 
@@ -147,9 +168,12 @@ window.addEventListener("DOMContentLoaded", () => {
   function easeReadout() {
     if (readout) {
       let text = "";
-      if (shownState() === "atlimit") {
-        // At the limit, show the countdown to the quota refresh instead of rate.
+      if (quotaPct >= 1.0) {
+        // At/over the quota ceiling: show the countdown to the window refresh.
         text = `${formatCountdown(countdownMin)} ⏳`;
+      } else if (nearLimit > 0) {
+        // In the near-limit band: show how close to the ceiling.
+        text = `${Math.round(quotaPct * 100)}%`;
       } else if (rateActive) {
         displayTpm += (targetTpm - displayTpm) * RATE_EASE_ALPHA;
         if (Math.abs(targetTpm - displayTpm) < 0.5) displayTpm = targetTpm; // snap when settled
@@ -171,12 +195,17 @@ window.addEventListener("DOMContentLoaded", () => {
   // 2 frames alternate, 3+ make a smooth back-and-forth.
   setInterval(() => {
     if (!sprite) return;
-    // A dev-forced pose wins outright (including a forced "surprised"); otherwise
-    // the transient perk-up pose shows while its latch is live, else live state.
-    const frames =
-      devForced === null && Date.now() < surprisedUntil
-        ? framesFor("surprised")
-        : framesFor(shownState());
+    // Pose priority: a dev-forced pose wins outright; otherwise a live one-shot
+    // event plays for its dwell, then the base pose.
+    let pose: string;
+    if (devForced !== null) {
+      pose = devForced;
+    } else if (activeEvent !== null && Date.now() < eventUntil) {
+      pose = activeEvent;
+    } else {
+      pose = liveState;
+    }
+    const frames = framesFor(pose);
     const n = frames.length;
     if (n === 0) return;
     const period = n <= 1 ? 1 : 2 * (n - 1);
@@ -188,18 +217,10 @@ window.addEventListener("DOMContentLoaded", () => {
   listen<GameState>("game-state", (event) => {
     const s = event.payload;
 
-    // Surprised "perk-up": resting (sleeping/done/waiting/calm/refreshed/error/
-    // longrun) -> busy.
-    const RESTING = new Set([
-      "sleeping", "done", "waiting", "calm", "refreshed", "error", "longrun",
-    ]);
-    const BUSY = new Set(["working", "stressed", "onfire"]);
-    if (RESTING.has(prevState) && BUSY.has(s.state)) {
-      surprisedUntil = Date.now() + FRAME_MS;
-    }
-    prevState = s.state;
-    liveState = s.state;
+    liveState = s.baseState;
     countdownMin = s.timeRemainingMin;
+    quotaPct = s.quotaPercent;
+    nearLimit = s.nearLimitOpacity;
 
     // Per-model hat overlay (hidden when there's no art for this model). Runs
     // before paintClass so liveModel is current for the class string.
@@ -218,6 +239,13 @@ window.addEventListener("DOMContentLoaded", () => {
     // A dev-forced pose pins the class; otherwise track the live state.
     paintClass();
     if (pet) pet.style.opacity = String(s.opacity);
+
+    // Layer 3 — start a one-shot event pose (the sprite loop plays it for its
+    // dwell). The backend already debounced/prioritized which one to send.
+    if (s.event) {
+      activeEvent = s.event;
+      eventUntil = Date.now() + EVENT_MS;
+    }
 
     // Feed the eased readout loop; it renders on its own frame cadence.
     rateActive = s.isActive;
