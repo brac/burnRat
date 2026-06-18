@@ -263,7 +263,11 @@ impl DataMonitor {
         // Remember the model so the frontend can pick a hat. Only assistant
         // lines carry `message.model`.
         if line_type == "assistant" {
-            if let Some(m) = v.get("message").and_then(|m| m.get("model")).and_then(|x| x.as_str()) {
+            if let Some(m) = v
+                .get("message")
+                .and_then(|m| m.get("model"))
+                .and_then(|x| x.as_str())
+            {
                 self.latest_model = Some(m.to_string());
             }
         }
@@ -283,7 +287,7 @@ impl DataMonitor {
         } else {
             classify_user(v)
         };
-        if self.latest_conv.map_or(true, |(prev, _)| ts >= prev) {
+        if self.latest_conv.is_none_or(|(prev, _)| ts >= prev) {
             self.latest_conv = Some((ts, awaiting));
         }
     }
@@ -307,7 +311,11 @@ impl DataMonitor {
 fn dedup_key(v: &serde_json::Value) -> Option<String> {
     v.get("requestId")
         .and_then(|x| x.as_str())
-        .or_else(|| v.get("message").and_then(|m| m.get("id")).and_then(|x| x.as_str()))
+        .or_else(|| {
+            v.get("message")
+                .and_then(|m| m.get("id"))
+                .and_then(|x| x.as_str())
+        })
         .or_else(|| v.get("uuid").and_then(|x| x.as_str()))
         .map(|s| s.to_string())
 }
@@ -357,9 +365,13 @@ pub fn historical_peak_block(
         if !recent {
             continue;
         }
-        let Ok(f) = std::fs::File::open(&file) else { continue };
+        let Ok(f) = std::fs::File::open(&file) else {
+            continue;
+        };
         for line in BufReader::new(f).lines().map_while(Result::ok) {
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                continue;
+            };
             if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
                 continue;
             }
@@ -396,7 +408,10 @@ fn classify_assistant(v: &serde_json::Value) -> Awaiting {
     if stop == Some("end_turn") {
         return Awaiting::Done;
     }
-    if let Some(content) = msg.and_then(|m| m.get("content")).and_then(|c| c.as_array()) {
+    if let Some(content) = msg
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array())
+    {
         for block in content {
             if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
                 if let Some(name) = block.get("name").and_then(|n| n.as_str()) {
@@ -419,9 +434,9 @@ fn classify_user(v: &serde_json::Value) -> Awaiting {
     match v.get("message").and_then(|m| m.get("content")) {
         Some(serde_json::Value::String(_)) => Awaiting::Sent,
         Some(serde_json::Value::Array(blocks)) => {
-            let has_message = blocks.iter().any(|b| {
-                b.get("type").and_then(|t| t.as_str()) != Some("tool_result")
-            });
+            let has_message = blocks
+                .iter()
+                .any(|b| b.get("type").and_then(|t| t.as_str()) != Some("tool_result"));
             if has_message {
                 Awaiting::Sent
             } else {

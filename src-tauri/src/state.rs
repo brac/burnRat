@@ -142,12 +142,7 @@ impl StateMachine {
     }
 
     /// The post-onfire crash: collapse to spent, hold, then relax to thinking.
-    fn apply_spent(
-        &mut self,
-        base: BaseState,
-        smoothed_tpm: f64,
-        now: DateTime<Utc>,
-    ) -> BaseState {
+    fn apply_spent(&mut self, base: BaseState, smoothed_tpm: f64, now: DateTime<Utc>) -> BaseState {
         let cfg = &self.thresholds.spent;
 
         // Already crashing: stay spent until the timer ends or work resumes.
@@ -220,11 +215,23 @@ mod tests {
     fn thresholds() -> Thresholds {
         Thresholds {
             states: StateThresholds {
-                working: StateCut { up: 1500.0, down: 800.0 },
-                stressed: StateCut { up: 8000.0, down: 5500.0 },
-                onfire: StateCut { up: 25000.0, down: 18000.0 },
+                working: StateCut {
+                    up: 1500.0,
+                    down: 800.0,
+                },
+                stressed: StateCut {
+                    up: 8000.0,
+                    down: 5500.0,
+                },
+                onfire: StateCut {
+                    up: 25000.0,
+                    down: 18000.0,
+                },
             },
-            quota: QuotaCfg { start_percent: 0.90, full_percent: 0.99 },
+            quota: QuotaCfg {
+                start_percent: 0.90,
+                full_percent: 0.99,
+            },
             events: EventsCfg {
                 priority: vec!["error".into(), "refreshed".into(), "flinch".into()],
                 error_debounce_seconds: 30,
@@ -235,8 +242,12 @@ mod tests {
                 after_onfire_seconds: 90,
                 duration_seconds: 20,
             },
-            onfire: OnfireCfg { sustained_seconds: 12 },
-            spike: SpikeCfg { instant_tpm_flinch: 80000.0 },
+            onfire: OnfireCfg {
+                sustained_seconds: 12,
+            },
+            spike: SpikeCfg {
+                instant_tpm_flinch: 80000.0,
+            },
             activity_floor_seconds: 15,
             idle_timeout_seconds: 90,
             done_hold_seconds: 120,
@@ -249,19 +260,17 @@ mod tests {
     }
 
     // Convenience: (is_active, done, asking, sent, recent, smoothed, instant).
-    fn step(
-        m: &mut StateMachine,
-        smoothed: f64,
-        now: DateTime<Utc>,
-    ) -> BaseState {
-        m.update(true, false, false, false, false, smoothed, 0.0, now).0
+    fn step(m: &mut StateMachine, smoothed: f64, now: DateTime<Utc>) -> BaseState {
+        m.update(true, false, false, false, false, smoothed, 0.0, now)
+            .0
     }
 
     #[test]
     fn sleeps_when_inactive() {
         let mut m = StateMachine::new(thresholds());
         assert_eq!(
-            m.update(false, false, false, false, false, 99_999.0, 0.0, t0()).0,
+            m.update(false, false, false, false, false, 99_999.0, 0.0, t0())
+                .0,
             BaseState::Sleeping
         );
     }
@@ -280,7 +289,7 @@ mod tests {
         let mut m = StateMachine::new(thresholds());
         let t = t0();
         step(&mut m, 10_000.0, t); // -> frantic
-        // Between stressed.down (5500) and stressed.up (8000): stays frantic.
+                                   // Between stressed.down (5500) and stressed.up (8000): stays frantic.
         assert_eq!(step(&mut m, 6_500.0, t), BaseState::Frantic);
         // Below stressed.down: drop to working.
         assert_eq!(step(&mut m, 4_000.0, t), BaseState::Working);
@@ -307,9 +316,15 @@ mod tests {
         let crash = hot + Duration::seconds(10);
         assert_eq!(step(&mut m, 100.0, crash), BaseState::Spent);
         // Still spent during the crash window.
-        assert_eq!(step(&mut m, 100.0, crash + Duration::seconds(5)), BaseState::Spent);
+        assert_eq!(
+            step(&mut m, 100.0, crash + Duration::seconds(5)),
+            BaseState::Spent
+        );
         // After the crash window, relaxes to thinking.
-        assert_eq!(step(&mut m, 100.0, crash + Duration::seconds(25)), BaseState::Thinking);
+        assert_eq!(
+            step(&mut m, 100.0, crash + Duration::seconds(25)),
+            BaseState::Thinking
+        );
     }
 
     #[test]
@@ -343,7 +358,8 @@ mod tests {
         let mut m = StateMachine::new(thresholds());
         // A finished turn wins over a high rate / recent activity.
         assert_eq!(
-            m.update(true, true, false, false, true, 30_000.0, 0.0, t0()).0,
+            m.update(true, true, false, false, true, 30_000.0, 0.0, t0())
+                .0,
             BaseState::Done
         );
     }
@@ -353,7 +369,8 @@ mod tests {
         let mut m = StateMachine::new(thresholds());
         // An interactive question now also reads as Done (waiting on the user).
         assert_eq!(
-            m.update(true, false, true, false, true, 30_000.0, 0.0, t0()).0,
+            m.update(true, false, true, false, true, 30_000.0, 0.0, t0())
+                .0,
             BaseState::Done
         );
     }
@@ -363,7 +380,8 @@ mod tests {
         let mut m = StateMachine::new(thresholds());
         // A just-sent user message → thinking, even over a stale high rate.
         assert_eq!(
-            m.update(true, false, false, true, false, 30_000.0, 0.0, t0()).0,
+            m.update(true, false, false, true, false, 30_000.0, 0.0, t0())
+                .0,
             BaseState::Thinking
         );
     }

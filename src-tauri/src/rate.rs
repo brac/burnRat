@@ -38,7 +38,10 @@ pub struct UnitSelector {
 
 impl UnitSelector {
     pub fn new(cfg: DisplayCfg) -> Self {
-        UnitSelector { cfg, unit: RateUnit::PerSecond }
+        UnitSelector {
+            cfg,
+            unit: RateUnit::PerSecond,
+        }
     }
 
     pub fn select(&mut self, smoothed_tpm: f64) -> RateUnit {
@@ -202,7 +205,13 @@ mod tests {
             let now = start + chrono::Duration::seconds(i);
             t.sample(now, 100_000); // no new tokens
             let cur = t.smoothed_tpm();
-            assert!(cur < prev, "EMA did not decay at tick {}: {} -> {}", i, prev, cur);
+            assert!(
+                cur < prev,
+                "EMA did not decay at tick {}: {} -> {}",
+                i,
+                prev,
+                cur
+            );
             assert!(cur > 0.0, "EMA cratered to zero in one step at tick {}", i);
             prev = cur;
         }
@@ -225,7 +234,10 @@ mod tests {
     }
 
     fn selector() -> UnitSelector {
-        UnitSelector::new(DisplayCfg { per_sec_above_tpm: 90.0, per_min_below_tpm: 50.0 })
+        UnitSelector::new(DisplayCfg {
+            per_sec_above_tpm: 90.0,
+            per_min_below_tpm: 50.0,
+        })
     }
 
     #[test]

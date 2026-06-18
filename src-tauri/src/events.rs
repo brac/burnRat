@@ -31,7 +31,10 @@ impl Default for RefreshTracker {
 
 impl RefreshTracker {
     pub fn new() -> Self {
-        RefreshTracker { cur_end: None, saw_active: false }
+        RefreshTracker {
+            cur_end: None,
+            saw_active: false,
+        }
     }
 
     /// Advance one tick; returns `true` only on the single tick the observed
@@ -69,7 +72,11 @@ pub struct EventResolver {
 
 impl EventResolver {
     pub fn new(cfg: EventsCfg) -> Self {
-        EventResolver { cfg, last_error: None, last_refreshed: None }
+        EventResolver {
+            cfg,
+            last_error: None,
+            last_refreshed: None,
+        }
     }
 
     /// Pick the highest-priority *eligible* event (or `None`). `error_now` is the
@@ -84,13 +91,20 @@ impl EventResolver {
     ) -> Option<&'static str> {
         for name in &self.cfg.priority {
             match name.as_str() {
-                "error" if error_now && self.ready(self.last_error, self.cfg.error_debounce_seconds, now) => {
+                "error"
+                    if error_now
+                        && self.ready(self.last_error, self.cfg.error_debounce_seconds, now) =>
+                {
                     self.last_error = Some(now);
                     return Some("error");
                 }
                 "refreshed"
                     if refreshed_edge
-                        && self.ready(self.last_refreshed, self.cfg.refreshed_cooldown_seconds, now) =>
+                        && self.ready(
+                            self.last_refreshed,
+                            self.cfg.refreshed_cooldown_seconds,
+                            now,
+                        ) =>
                 {
                     self.last_refreshed = Some(now);
                     return Some("refreshed");
@@ -161,19 +175,28 @@ mod tests {
     #[test]
     fn priority_error_beats_refreshed_and_flinch() {
         let mut r = resolver();
-        assert_eq!(r.resolve(true, true, Some("flinch"), secs(0)), Some("error"));
+        assert_eq!(
+            r.resolve(true, true, Some("flinch"), secs(0)),
+            Some("error")
+        );
     }
 
     #[test]
     fn refreshed_beats_flinch() {
         let mut r = resolver();
-        assert_eq!(r.resolve(true, false, Some("flinch"), secs(0)), Some("refreshed"));
+        assert_eq!(
+            r.resolve(true, false, Some("flinch"), secs(0)),
+            Some("refreshed")
+        );
     }
 
     #[test]
     fn flinch_when_alone() {
         let mut r = resolver();
-        assert_eq!(r.resolve(false, false, Some("flinch"), secs(0)), Some("flinch"));
+        assert_eq!(
+            r.resolve(false, false, Some("flinch"), secs(0)),
+            Some("flinch")
+        );
         assert_eq!(r.resolve(false, false, None, secs(0)), None);
     }
 
