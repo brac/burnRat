@@ -645,13 +645,13 @@ fn spawn_character_watcher(
 
 /// Build the tray icon and its menu (move mode, opacity, character, quit).
 fn build_tray(app: &tauri::App, shared: Arc<Shared>) -> tauri::Result<()> {
-    let toggle = MenuItem::with_id(
-        app,
-        "toggle",
-        "Pass-Through  (Ctrl+Shift+M)",
-        true,
-        None::<&str>,
-    )?;
+    // The pass-through hotkey uses the platform's primary modifier (Cmd on
+    // macOS, Ctrl elsewhere) — label it to match what the user actually presses.
+    #[cfg(target_os = "macos")]
+    let toggle_label = "Pass-Through  (Cmd+Shift+M)";
+    #[cfg(not(target_os = "macos"))]
+    let toggle_label = "Pass-Through  (Ctrl+Shift+M)";
+    let toggle = MenuItem::with_id(app, "toggle", toggle_label, true, None::<&str>)?;
 
     // Opacity submenu — fixed steps.
     let current_pct = shared.opacity_pct.load(Ordering::Relaxed);
@@ -875,7 +875,7 @@ pub fn run() {
 
             build_tray(app, shared.clone())?;
 
-            // Global shortcuts:
+            // Global shortcuts (Cmd on macOS, Ctrl elsewhere):
             //   Ctrl/Cmd+Shift+M — toggle pass-through (clicks fall through).
             //   Ctrl/Cmd+Shift+Y / +N — Allow / Deny the current permission
             //   request from anywhere (no need to focus the bubble). No-op when
@@ -884,6 +884,11 @@ pub fn run() {
                 use tauri_plugin_global_shortcut::{
                     Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
                 };
+                // Use the platform's primary modifier: Cmd (SUPER) on macOS,
+                // Ctrl elsewhere — i.e. the "Ctrl/Cmd" the README advertises.
+                #[cfg(target_os = "macos")]
+                let mods = Modifiers::SUPER | Modifiers::SHIFT;
+                #[cfg(not(target_os = "macos"))]
                 let mods = Modifiers::CONTROL | Modifiers::SHIFT;
 
                 let sc = Shortcut::new(Some(mods), Code::KeyM);

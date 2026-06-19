@@ -6,7 +6,7 @@
 // We PULL the active request (current_permission) whenever the window gains
 // focus, rather than relying only on the pushed "permission-request" event — a
 // freshly-shown window can miss the emit, which would leave the id unknown and
-// make the buttons no-ops. Global Ctrl+Shift+Y/N resolve it in Rust too;
+// make the buttons no-ops. Global Ctrl/Cmd+Shift+Y/N resolve it in Rust too;
 // "permission-resolved" tells us to hide. Escape = defer to Claude's prompt.
 
 import { listen } from "@tauri-apps/api/event";
@@ -22,6 +22,14 @@ interface PermissionInfo {
 const win = getCurrentWindow();
 
 window.addEventListener("DOMContentLoaded", () => {
+  // The global hotkey uses the platform's primary modifier (Cmd on macOS),
+  // so label the hint to match what the user actually presses.
+  if (/Mac/i.test(navigator.userAgent || navigator.platform)) {
+    document
+      .querySelectorAll<HTMLElement>(".mod")
+      .forEach((el) => (el.textContent = "Cmd"));
+  }
+
   const toolEl = document.querySelector<HTMLElement>("#tool")!;
   const detailEl = document.querySelector<HTMLElement>("#detail")!;
   const allowBtn = document.querySelector<HTMLButtonElement>("#allow")!;
