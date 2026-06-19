@@ -15,7 +15,8 @@
     "frantic":  { "asset": "frantic.png" },
     "onfire":   { "asset": "onfire.png" },
     "spent":    { "asset": "spent.png" },
-    "done":     { "asset": "done.png" }
+    "done":     { "asset": "done.png" },
+    "asking":   { "asset": "asking.png" }
   },
 
   "modifiers": {

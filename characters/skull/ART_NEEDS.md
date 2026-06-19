@@ -19,7 +19,8 @@ placeholder and it appears on the next character switch / app restart — the
 | `frantic.png` | base | flames whipping; high burn |
 | `onfire.png` | base | peak — fully ablaze (sustained high rate) |
 | `spent.png` | base | burnt out / smoldering (post-onfire crash) |
-| `done.png` | base | calm flame; "your turn" (finished turn or asking) |
+| `done.png` | base | calm flame; "your turn" — a finished turn (your move) |
+| `asking.png` | base (optional) | skull is **asking *you***: a multiple-choice question (`AskUserQuestion` / plan approval, answered in the terminal) **or** a pending tool-permission (also shows the Allow/Deny pet bubble). Distinct from `done` — "I need your input." Placeholder = `done.png`; falls back to `done` without it. |
 | `nearlimit.png` | modifier (`quotaProximity`) | **OVERLAY** — see caveat below |
 | `refreshed.png` | event | brief flare-up; fresh quota one-shot |
 | `error.png` | event | concern / sputter; API-error one-shot |
